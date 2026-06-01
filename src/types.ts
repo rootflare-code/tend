@@ -2,6 +2,14 @@ export type FeedId = string;
 export type CardStatus = "to_review_new" | "to_review_updated" | "queued" | "working" | "done";
 export type CardKind = "attention" | "feed_improvement";
 export type WorkStatus = "queued" | "working" | "completed" | "failed" | "stale" | "cancelled";
+export type VoiceTarget =
+  | { kind: "card"; feedId: string; cardId: string }
+  | { kind: "sweep"; feedId: string; runId?: string }
+  | { kind: "feed"; feedId: string }
+  | { kind: "source_recipe"; feedId: string; sourceId: string }
+  | { kind: "prompt_layer"; feedId: string; promptId: string }
+  | { kind: "global_prompt"; promptId: string }
+  | { kind: "attention" };
 export type BlockType =
   | "rich_text"
   | "evidence"
@@ -95,6 +103,11 @@ export interface Card {
   updatedAt: string;
   completedAt?: string;
   history: Array<{ at: string; type: string; detail?: string }>;
+  sweep?: {
+    rank: number;
+    hidden: boolean;
+    feedbackId: string;
+  };
 }
 
 export interface WorkItem {
@@ -124,6 +137,51 @@ export interface FeedEvent {
   detail?: unknown;
 }
 
+export interface SweepState {
+  currentRunId: string | null;
+  lastFeedbackId: string | null;
+  recollectionOffered: boolean;
+  statusMessage: string | null;
+}
+
+export interface SweepFeedbackTrace {
+  id: string;
+  feedId: FeedId;
+  runId?: string;
+  instruction: string;
+  visibleCardIds: string[];
+  orderedCardIds: string[];
+  removedCardIds: string[];
+  createdAt: string;
+}
+
+export interface RevisionProposal {
+  id: string;
+  anchorFeedId: FeedId;
+  target: VoiceTarget;
+  label: string;
+  instruction: string;
+  previous: string;
+  next: string;
+  status: "proposed" | "applied" | "rejected";
+  createdAt: string;
+  appliedAt?: string;
+  appliedRevisionId?: string;
+}
+
+export interface WorkspaceRevision {
+  id: string;
+  anchorFeedId: FeedId;
+  target: VoiceTarget;
+  previous: string;
+  next: string;
+  reason: string;
+  source: "manual_edit" | "voice_proposal";
+  status: "applied" | "reverted";
+  createdAt: string;
+  revertedAt?: string;
+}
+
 export interface PolicyRevision {
   id: string;
   feedId: FeedId;
@@ -143,6 +201,7 @@ export interface FeedView {
   policy: string;
   cards: Card[];
   work: WorkItem[];
+  sweep: SweepState;
   readyNextPass: number;
 }
 
@@ -150,4 +209,5 @@ export interface WorkspaceView {
   feeds: Array<{ id: string; name: string; purpose: string }>;
   active: FeedView;
   dictation: DictationCapability;
+  proposals: RevisionProposal[];
 }

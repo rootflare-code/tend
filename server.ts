@@ -61,10 +61,28 @@ app.post("/api/feeds", async (c) => mutation(c, async () => {
 app.post("/api/feeds/:feed/bind", async (c) => mutation(c, async () => domain.bindFeed(c.req.param("feed"), String((await body(c)).threadId ?? ""))));
 app.post("/api/feeds/:feed/heartbeat", async (c) => mutation(c, async () => domain.proposeHeartbeat(c.req.param("feed"), String((await body(c)).cadence ?? ""))));
 app.post("/api/feeds/:feed/sources", async (c) => mutation(c, async () => domain.addSourceFromBrief(c.req.param("feed"), String((await body(c)).brief ?? ""))));
-app.post("/api/feeds/:feed/sources/:source", async (c) => mutation(c, async () => domain.updateSourceRecipe(c.req.param("feed"), c.req.param("source"), String((await body(c)).content ?? ""))));
-app.post("/api/feeds/:feed/policy", async (c) => mutation(c, async () => domain.applyPolicyRevision(c.req.param("feed"), String((await body(c)).content ?? ""), "Edited in the feed workspace.", "user_instruction")));
-app.post("/api/global-policy", async (c) => mutation(c, async () => domain.updateGlobalPolicy(String((await body(c)).content ?? ""))));
-app.post("/api/global-prompts/:prompt", async (c) => mutation(c, async () => domain.updateGlobalPrompt(c.req.param("prompt"), String((await body(c)).content ?? ""))));
+app.post("/api/feeds/:feed/sources/:source", async (c) => mutation(c, async () => domain.updateWorkspaceDocument(c.req.param("feed"), { kind: "source_recipe", feedId: c.req.param("feed"), sourceId: c.req.param("source") }, String((await body(c)).content ?? ""))));
+app.post("/api/feeds/:feed/policy", async (c) => mutation(c, async () => domain.updateWorkspaceDocument(c.req.param("feed"), { kind: "feed", feedId: c.req.param("feed") }, String((await body(c)).content ?? ""))));
+app.post("/api/feeds/:feed/prompts/:prompt", async (c) => mutation(c, async () => domain.updateWorkspaceDocument(c.req.param("feed"), { kind: "prompt_layer", feedId: c.req.param("feed"), promptId: c.req.param("prompt") }, String((await body(c)).content ?? ""))));
+app.post("/api/global-policy", async (c) => mutation(c, async () => {
+  const input = await body(c);
+  return domain.updateWorkspaceDocument(String(input.feedId ?? "inbox"), { kind: "attention" }, String(input.content ?? ""));
+}));
+app.post("/api/global-prompts/:prompt", async (c) => mutation(c, async () => {
+  const input = await body(c);
+  return domain.updateWorkspaceDocument(String(input.feedId ?? "inbox"), { kind: "global_prompt", promptId: c.req.param("prompt") }, String(input.content ?? ""));
+}));
+app.post("/api/voice/target-change", async (c) => mutation(c, async () => {
+  const input = await body(c);
+  return domain.recordVoiceTargetChange(String(input.feedId ?? "inbox"), input.target);
+}));
+app.post("/api/voice/instructions", async (c) => mutation(c, async () => {
+  const input = await body(c);
+  return domain.submitVoiceInstruction(String(input.feedId ?? "inbox"), input.target, String(input.instruction ?? ""));
+}));
+app.post("/api/revision-proposals/:proposal/apply", async (c) => mutation(c, async () => domain.applyRevisionProposal(c.req.param("proposal"))));
+app.post("/api/revisions/:revision/revert", async (c) => mutation(c, async () => domain.revertWorkspaceRevision(c.req.param("revision"))));
+app.post("/api/feeds/:feed/recollect", async (c) => mutation(c, async () => domain.requestSweepRecollection(c.req.param("feed"))));
 app.post("/api/feeds/:feed/instructions", async (c) => mutation(c, async () => domain.queueFeedInstruction(c.req.param("feed"), String((await body(c)).instruction ?? ""))));
 app.post("/api/feeds/:feed/cards/:card/instructions", async (c) => mutation(c, async () => domain.queueInstruction(c.req.param("feed"), c.req.param("card"), String((await body(c)).instruction ?? ""))));
 app.post("/api/feeds/:feed/work/:work/cancel", async (c) => mutation(c, async () => domain.cancelQueuedWork(c.req.param("feed"), c.req.param("work"), String((await body(c)).reason ?? "Cancelled from the browser before Codex started work."))));
