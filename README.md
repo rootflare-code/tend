@@ -43,6 +43,12 @@ reads its local recording shortcut and records a safe browser-facing capability 
 and switches into a visible listening state, then automatically submits injected text shortly after
 keyup once the text settles. There is no clickable dictation control.
 
+The dock stays visible on feed and workspace screens. Its pill always names the conversational
+target. While the dock field is active, use `ArrowUp` and `ArrowDown` to move between the visible
+object, current sweep, feed, and Attention scopes. `Option+ArrowUp` and `Option+ArrowDown` work
+anywhere as an alternate shortcut. Sweep feedback immediately reranks the current cards and offers a
+separate `Search sources again` action; broader feedback becomes an approval-gated revision diff.
+
 ## Workspace
 
 Runtime data lives under ignored `data/`:
@@ -52,18 +58,23 @@ data/
   global-policy.md
   integrations/dictation.json
   prompts/*.md
+  revision-proposals/*.json
+  workspace-revisions/*.json
   archived-feeds/<feed-id>-<timestamp>/
   feeds/<feed-id>/
     feed.md
     policy.md
     thread.json
     sources/*.md
+    prompts/*.md
     checkpoints/*.json
     raw/<run-id>/<source-id>/*.json
     runs/*.json
     cards/*.json
     work/*.json
     policy-revisions/*.json
+    sweep-feedback/*.json
+    sweep-state.json
     events.jsonl
 ```
 

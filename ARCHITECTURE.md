@@ -32,13 +32,18 @@ data/
     thread.json
     sources.json
     sources/*.md
+    prompts/*.md
     checkpoints/*.json
     raw/<run-id>/<source-id>/*.json
     runs/*.json
     cards/*.json
     work/*.json
     policy-revisions/*.json
+    sweep-feedback/*.json
+    sweep-state.json
     events.jsonl
+  revision-proposals/*.json
+  workspace-revisions/*.json
 ```
 
 The compact Markdown files are the editable prompt layer. The JSON files preserve structured
@@ -74,9 +79,12 @@ There are three learning surfaces:
 - `events.jsonl`, `runs/`, and `raw/`: the underlying trace and evidence layer. This remains detailed
   so policies can be reevaluated later.
 
-Small corrections can become reversible policy revisions. Broader changes, new permissions, prompt
-edits, or new sources should become visible proposal cards first. The end-of-pass `Compound
-learnings` action queues that deeper review for Codex.
+Small corrections can become reversible policy revisions. The persistent dock keeps its target
+explicit: active card, current sweep, feed, source recipe, prompt layer, global prompt, or Attention.
+Card instructions enter the existing work queue. Sweep feedback records a trace and locally reranks
+or removes visible cards before any optional recollection. Broader voice instructions become visible
+revision proposals with diffs and explicit approval. Direct workspace edits remain available with
+revision history and undo. The end-of-pass `Compound learnings` action queues deeper review for Codex.
 
 ## Safety Boundary
 
