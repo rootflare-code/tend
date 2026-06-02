@@ -86,11 +86,11 @@ Prompt files describe how to judge, compose cards, execute work, distill small p
 and compound deeper learnings. Feed policy files remain compact and human-readable. Raw snapshots
 stay immutable so the policy can be rebuilt or evaluated later.
 
-At the end of a sweep, the feed thread may ask whether to compound learnings. After the user agrees,
-Codex queues `learning:request`, reviews the durable evidence, and creates a compact feed-policy
-revision with `revision:propose --source compound`. The browser opens a dedicated learning-review
-screen. The user can edit the proposed Markdown and apply or reject it; Codex never applies a
-compounded policy change on its own.
+At the end of a meaningful sweep, the idle CLI handshake tells the feed thread to ask whether to
+compound learnings. After the user agrees, Codex queues `learning:request`, reviews the durable
+evidence, and creates a compact feed-policy revision with `revision:propose --source compound`. The
+browser opens a dedicated learning-review screen. The user can edit the proposed Markdown and apply
+or reject it; Codex never applies a compounded policy change on its own.
 
 The in-app-browser `Prompts & sources` workspace is a full screen rather than a dialog. `This feed`
 edits the active feed policy and source recipes. `Global prompts` edits `global-policy.md` and the

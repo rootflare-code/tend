@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AttentionDomain } from "./server/domain";
+import { formatWorkClaimOutput, formatWorkListOutput } from "./server/operator";
 import { AttentionStore } from "./server/store";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -186,10 +187,16 @@ switch (command) {
     output = await domain.undoDismiss(required("feed"), required("card"));
     break;
   case "work:list":
-    output = await domain.listPendingWork(required("feed"), required("thread"), flag("cross-feed"));
+    {
+      const feedId = required("feed");
+      output = formatWorkListOutput(feedId, await domain.listPendingWork(feedId, required("thread"), flag("cross-feed")));
+    }
     break;
   case "work:claim":
-    output = await domain.claimWork(required("feed"), required("thread"), flag("cross-feed"));
+    {
+      const feedId = required("feed");
+      output = formatWorkClaimOutput(feedId, await domain.claimWork(feedId, required("thread"), flag("cross-feed")));
+    }
     break;
   case "work:cancel":
     output = await domain.cancelQueuedWork(required("feed"), required("work"), value("reason"));

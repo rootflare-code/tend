@@ -41,8 +41,27 @@ before acting:
 pnpm cli -- action:verify --feed <feed-id> --work <work-id> --token <capability-token>
 ```
 
-Repeat claim until it returns `null`. An active claimed item is replayed so restart recovery stays
-simple and visible.
+Repeat claim until it returns the idle handshake. An active claimed item is replayed so restart
+recovery stays simple and visible.
+
+## End Of Sweep
+
+After a meaningful sweep or refresh reaches the idle handshake, always ask:
+
+> Want me to compound what I learned from this sweep?
+
+`Compound` means:
+
+1. Review this sweep's cards, feedback, outcomes, and prior policy.
+2. After the user agrees, queue `pnpm cli -- learning:request --feed <feed-id>`.
+3. Drain the resulting `compound_learnings` job and return an editable policy proposal.
+4. Never apply the proposal without user approval.
+
+If the user asks to compound and search again, compound first. Recollect after the reviewed policy
+proposal is applied, or after the user explicitly says to continue without applying it.
+
+Do not repeat the question when a wake begins idle and no meaningful sweep or refresh happened in
+the current turn.
 
 Dock work includes its explicit `target` and `intent`. Interpret the utterance from current state:
 write back cards, source changes, reranked sweeps, or a revision proposal as appropriate. Do not
