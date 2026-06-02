@@ -86,8 +86,10 @@ explicit: active card, current sweep, feed, source recipe, prompt layer, global 
 Every dock instruction enters the same scoped work queue. Sweep feedback records a trace and asks
 Codex to rejudge the visible batch; the browser does not interpret the prose or hide cards on its own.
 Codex can write back reranked cards, source changes, or visible revision proposals with explicit
-approval. Direct workspace edits remain available with revision history and undo. The end-of-pass
-`Compound learnings` action queues deeper review for Codex.
+approval. Direct workspace edits remain available with revision history and undo. At the end of a
+pass, Codex can ask whether the user wants a deeper learning review. After the user agrees,
+`learning:request` queues the pass and Codex returns an editable `revision:propose --source compound`
+proposal. The browser opens a dedicated review screen and never applies the proposal by itself.
 
 ## Safety Boundary
 

@@ -184,16 +184,161 @@ describe("approval, learning, and heartbeat safety", () => {
 
   test("refuses approved external work when the editable artifact changed", async () => {
     const { store, domain } = await setup();
-    await domain.seedDemo();
+    await domain.upsertCard("inbox", {
+      id: "external-reply-safety-fixture",
+      title: "Send this reply.",
+      why: "Approval must bind to the exact visible artifact.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "draft", type: "editable_text", label: "Draft reply", value: "Original draft.", editable: true }],
+      proposedAction: { label: "Send this reply", instruction: "Send the exact currently approved reply.", artifactBlockId: "draft", externalMutation: true, mailboxPolicy: "reply_from_source" },
+    });
     await domain.bindFeed("inbox", "thread-inbox");
-    const work = await domain.approveAction("inbox", "demo-inbox-partnership");
+    const work = await domain.approveAction("inbox", "external-reply-safety-fixture");
     await domain.claimWork("inbox", "thread-inbox");
-    expect((await domain.verifyApprovedAction("inbox", work.id, work.capabilityToken)).action.label).toBe("Send this reply");
-    await domain.updateBlock("inbox", "demo-inbox-partnership", "draft", "A different draft.");
+    expect((await domain.verifyApprovedAction("inbox", work.id, work.capabilityToken, "dan@every.to")).action.label).toBe("Send this reply");
+    await domain.updateBlock("inbox", "external-reply-safety-fixture", "draft", "A different draft.");
     await expect(domain.verifyApprovedAction("inbox", work.id, work.capabilityToken)).rejects.toThrow("Approval stale");
     await expect(domain.completeWork("inbox", work.id, work.capabilityToken, { response: "Sent." })).rejects.toThrow("Approval stale");
     expect((await store.readWork("inbox", work.id)).status).toBe("stale");
-    expect((await store.readCard("inbox", "demo-inbox-partnership")).status).toBe("to_review_updated");
+    expect((await store.readCard("inbox", "external-reply-safety-fixture")).status).toBe("to_review_updated");
+  });
+
+  test("persists editable-text changes even when an agent omitted the redundant editable flag", async () => {
+    const { store, domain } = await setup();
+    await domain.upsertCard("inbox", {
+      id: "agent-draft-without-flag",
+      title: "Review this reply.",
+      why: "The visible draft should be editable.",
+      blocks: [{ id: "draft", type: "editable_text", label: "Suggested reply", value: "Original draft." }],
+    });
+    await domain.updateBlock("inbox", "agent-draft-without-flag", "draft", "Visible revised draft.");
+    expect((await store.readCard("inbox", "agent-draft-without-flag")).blocks[0]).toMatchObject({
+      type: "editable_text",
+      value: "Visible revised draft.",
+      editable: true,
+    });
+  });
+
+  test("refuses Inbox reply approval without the mailbox that received the source email", async () => {
+    const { domain } = await setup();
+    await domain.upsertCard("inbox", {
+      id: "reply-without-source-mailbox",
+      title: "Send this reply.",
+      why: "Mailbox identity must be known before approval.",
+      blocks: [{ id: "draft", type: "editable_text", label: "Draft reply", value: "Hello.", editable: true }],
+      actions: [
+        { id: "send-reply", label: "Send reply", behavior: "approve_action", instruction: "Send the exact currently approved reply.", artifactBlockId: "draft", externalMutation: true, variant: "primary" },
+      ],
+    });
+    await expect(domain.runCardAction("inbox", "reply-without-source-mailbox", "send-reply")).rejects.toThrow("mailbox that received");
+  });
+
+  test("requires the authenticated Gmail mailbox to match before an Inbox reply can complete", async () => {
+    const { domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertCard("inbox", {
+      id: "reply-with-source-mailbox",
+      title: "Send this reply.",
+      why: "The connector account must match the source mailbox.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "draft", type: "editable_text", label: "Draft reply", value: "Hello.", editable: true }],
+      actions: [
+        { id: "send-reply", label: "Send reply", behavior: "approve_action", instruction: "Send the exact currently approved reply.", artifactBlockId: "draft", externalMutation: true, variant: "primary" },
+      ],
+    });
+    const work = await domain.runCardAction("inbox", "reply-with-source-mailbox", "send-reply");
+    await domain.claimWork("inbox", "thread-inbox");
+    await expect(domain.completeWork("inbox", work.id, work.capabilityToken, { response: "Sent." })).rejects.toThrow("must pass action:verify");
+    await expect(domain.verifyApprovedAction("inbox", work.id, work.capabilityToken)).rejects.toThrow("requires the authenticated Gmail mailbox");
+    await expect(domain.verifyApprovedAction("inbox", work.id, work.capabilityToken, "dshipper@gmail.com")).rejects.toThrow("mailbox mismatch");
+    expect((await domain.verifyApprovedAction("inbox", work.id, work.capabilityToken, "DAN@EVERY.TO")).verifiedMailbox).toBe("dan@every.to");
+    expect((await domain.completeWork("inbox", work.id, work.capabilityToken, { response: "Sent." })).status).toBe("completed");
+  });
+
+  test("keeps an approved blocked send out of review and retries only the unchanged snapshot", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertCard("inbox", {
+      id: "blocked-send",
+      title: "Send this exact reply.",
+      why: "The user approved the visible artifact.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "draft", type: "editable_text", label: "Draft reply", value: "Approved draft.", editable: true }],
+      actions: [
+        { id: "send-reply", label: "Send reply", behavior: "approve_action", instruction: "Send the exact currently approved reply.", artifactBlockId: "draft", externalMutation: true, variant: "primary" },
+      ],
+    });
+    const approved = await domain.runCardAction("inbox", "blocked-send", "send-reply");
+    await domain.claimWork("inbox", "thread-inbox");
+    await domain.blockApprovedWork("inbox", approved.id, approved.capabilityToken, "Connector temporarily refused the approved send.");
+    expect((await store.readWork("inbox", approved.id)).status).toBe("approved_blocked");
+    expect((await store.readCard("inbox", "blocked-send")).status).toBe("approved_blocked");
+    const retry = await domain.retryApprovedWork("inbox", approved.id);
+    expect(retry.status).toBe("queued");
+    expect((await store.readCard("inbox", "blocked-send")).status).toBe("queued");
+    const claimed = await domain.claimWork("inbox", "thread-inbox");
+    expect(claimed?.id).toBe(approved.id);
+    expect((await domain.verifyApprovedAction("inbox", approved.id, claimed!.capabilityToken, "dan@every.to")).artifact?.value).toBe("Approved draft.");
+  });
+
+  test("moves a completed approved action to done without an extra worker flag", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertCard("inbox", {
+      id: "approved-and-completed",
+      title: "Archive this handled notice.",
+      why: "The approved action should close the card when it succeeds.",
+      blocks: [{ id: "brief", type: "memo", text: "Already handled." }],
+      actions: [
+        { id: "archive", label: "Archive", behavior: "approve_action", instruction: "Archive the handled notice.", variant: "primary" },
+      ],
+    });
+    const approved = await domain.runCardAction("inbox", "approved-and-completed", "archive");
+    await domain.claimWork("inbox", "thread-inbox");
+    await domain.verifyApprovedAction("inbox", approved.id, approved.capabilityToken);
+    await domain.completeWork("inbox", approved.id, approved.capabilityToken, { response: "Archived." });
+    expect((await store.readCard("inbox", "approved-and-completed")).status).toBe("done");
+  });
+
+  test("routes card-specific buttons through preparation, exact approval, and default-cleanup semantics", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertCard("inbox", {
+      id: "custom-actions",
+      title: "Choose the right email response.",
+      why: "The reply direction is not obvious yet.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "draft", type: "editable_text", label: "Suggested reply", value: "Current exact draft.", editable: true }],
+      actions: [
+        { id: "draft-pass", label: "Draft a pass", behavior: "queue_instruction", instruction: "Draft a polite pass for review.", shortcut: "p" },
+        { id: "send-reply", label: "Send reply", behavior: "approve_action", instruction: "Send the exact currently approved reply.", artifactBlockId: "draft", externalMutation: true, variant: "primary", shortcut: "s" },
+        { id: "archive", label: "Archive", behavior: "default_cleanup", shortcut: "x" },
+      ],
+    });
+
+    const preparation = await domain.runCardAction("inbox", "custom-actions", "draft-pass");
+    expect(preparation.kind).toBe("instruction");
+    expect(preparation.instruction).toBe("Draft a polite pass for review.");
+    expect((await domain.claimWork("inbox", "thread-inbox"))?.id).toBe(preparation.id);
+    await domain.completeWork("inbox", preparation.id, preparation.capabilityToken, { response: "Prepared a pass for review." });
+
+    const send = await domain.runCardAction("inbox", "custom-actions", "send-reply");
+    expect(send.kind).toBe("execute_approved_action");
+    expect(send.cardActionId).toBe("send-reply");
+    expect((await domain.claimWork("inbox", "thread-inbox"))?.id).toBe(send.id);
+    expect((await domain.verifyApprovedAction("inbox", send.id, send.capabilityToken, "dan@every.to")).action.label).toBe("Send reply");
+    await domain.updateBlock("inbox", "custom-actions", "draft", "Changed after approval.");
+    await expect(domain.verifyApprovedAction("inbox", send.id, send.capabilityToken)).rejects.toThrow("Approval stale");
+
+    await domain.upsertCard("inbox", {
+      id: "custom-cleanup",
+      title: "Archive this FYI.",
+      why: "No response is needed.",
+      blocks: [{ id: "brief", type: "memo", text: "A low-attention notification." }],
+      actions: [{ id: "archive", label: "Archive", behavior: "default_cleanup", shortcut: "x" }],
+    });
+    expect((await domain.runCardAction("inbox", "custom-cleanup", "archive")).kind).toBe("default_cleanup");
+    expect((await store.readCard("inbox", "custom-cleanup")).status).toBe("queued");
   });
 
   test("queues default cleanup for Codex and allows a brief undo", async () => {
@@ -210,6 +355,87 @@ describe("approval, learning, and heartbeat safety", () => {
     expect((await domain.verifyApprovedAction("inbox", secondCleanup.id, secondCleanup.capabilityToken)).action.instruction).toBe("Archive the email thread.");
     await domain.completeWork("inbox", secondCleanup.id, secondCleanup.capabilityToken, { response: "Archived the authoritative email thread." });
     expect((await store.readCard("inbox", "inbox-ready-to-collect")).status).toBe("done");
+  });
+
+  test("queues one exact approval for a conservative routine-action group and records a collapsed audit", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    const group = await domain.upsertRoutineActionGroup("inbox", {
+      id: "likely-archive",
+      label: "Likely archive",
+      summary: "Low-attention threads with an obvious shared cleanup.",
+      proposedAction: { label: "Archive all", instruction: "Reread and archive each listed Gmail thread.", externalMutation: true },
+      items: [{ id: "setup-noise", cardId: "inbox-ready-to-collect", title: "Routine notice", reason: "No reply or decision is needed." }],
+    });
+    expect((await store.readCard("inbox", "inbox-ready-to-collect")).routineActionGroupId).toBe(group.id);
+    const [first, second] = await Promise.all([
+      domain.approveRoutineActionGroup("inbox", group.id),
+      domain.approveRoutineActionGroup("inbox", group.id),
+    ]);
+    expect(second.id).toBe(first.id);
+    expect((await domain.claimWork("inbox", "thread-inbox"))?.id).toBe(first.id);
+    expect((await store.readRoutineActionGroup("inbox", group.id)).status).toBe("working");
+    expect((await domain.verifyApprovedAction("inbox", first.id, first.capabilityToken)).action.label).toBe("Archive all");
+    await domain.completeWork("inbox", first.id, first.capabilityToken, { response: "Archived the authoritative threads." });
+    expect((await store.readRoutineActionGroup("inbox", group.id)).status).toBe("completed");
+    const card = await store.readCard("inbox", "inbox-ready-to-collect");
+    expect(card.status).toBe("done");
+    expect(card.routineActionGroupId).toBe(group.id);
+    await domain.upsertCard("inbox", {
+      id: card.id,
+      status: "to_review_updated",
+      title: "A newly relevant update",
+      why: "The source thread changed after the completed cleanup.",
+      blocks: [{ id: "brief", type: "memo", text: "Review this fresh source delta." }],
+    });
+    expect((await store.readCard("inbox", card.id)).routineActionGroupId).toBeUndefined();
+  });
+
+  test("restores a cancelled routine batch and rejects a batch whose visible snapshot changed after approval", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertRoutineActionGroup("inbox", {
+      id: "likely-archive",
+      label: "Likely archive",
+      summary: "Low-attention threads with an obvious shared cleanup.",
+      proposedAction: { label: "Archive all", instruction: "Reread and archive each listed Gmail thread.", externalMutation: true },
+      items: [{ id: "setup-noise", cardId: "inbox-ready-to-collect", title: "Routine notice", reason: "No reply or decision is needed." }],
+    });
+    const cancelled = await domain.approveRoutineActionGroup("inbox", "likely-archive");
+    await domain.cancelQueuedWork("inbox", cancelled.id, "User changed their mind.");
+    expect((await store.readRoutineActionGroup("inbox", "likely-archive")).status).toBe("proposed");
+    expect((await store.readCard("inbox", "inbox-ready-to-collect")).routineActionGroupId).toBe("likely-archive");
+
+    const work = await domain.approveRoutineActionGroup("inbox", "likely-archive");
+    expect((await domain.claimWork("inbox", "thread-inbox"))?.id).toBe(work.id);
+    const changed = await store.readRoutineActionGroup("inbox", "likely-archive");
+    changed.summary = "The visible approved snapshot changed.";
+    await store.writeRoutineActionGroup(changed);
+    await expect(domain.verifyApprovedAction("inbox", work.id, work.capabilityToken)).rejects.toThrow("Approval stale");
+    await expect(domain.completeWork("inbox", work.id, work.capabilityToken, { response: "Archived." })).rejects.toThrow("Approval stale");
+    expect((await store.readRoutineActionGroup("inbox", "likely-archive")).status).toBe("stale");
+    const card = await store.readCard("inbox", "inbox-ready-to-collect");
+    expect(card.status).toBe("to_review_updated");
+    expect(card.routineActionGroupId).toBeUndefined();
+  });
+
+  test("returns routine-batch items to full review when execution cannot safely proceed", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertRoutineActionGroup("inbox", {
+      id: "likely-archive",
+      label: "Likely archive",
+      summary: "Low-attention threads with an obvious shared cleanup.",
+      proposedAction: { label: "Archive all", instruction: "Reread and archive each listed Gmail thread.", externalMutation: true },
+      items: [{ id: "setup-noise", cardId: "inbox-ready-to-collect", title: "Routine notice", reason: "No reply or decision is needed." }],
+    });
+    const work = await domain.approveRoutineActionGroup("inbox", "likely-archive");
+    expect((await domain.claimWork("inbox", "thread-inbox"))?.id).toBe(work.id);
+    await domain.failWork("inbox", work.id, work.capabilityToken, "One source item changed before cleanup.");
+    expect((await store.readRoutineActionGroup("inbox", "likely-archive")).status).toBe("failed");
+    const card = await store.readCard("inbox", "inbox-ready-to-collect");
+    expect(card.status).toBe("to_review_updated");
+    expect(card.routineActionGroupId).toBeUndefined();
   });
 
   test("collapses concurrent dismiss cleanup and rejects changed cleanup configuration", async () => {
@@ -518,5 +744,31 @@ describe("scoped persistent voice dock routing", () => {
     expect((await domain.rejectRevisionProposal(proposal.id)).status).toBe("rejected");
     expect((await store.readWorkspace("company-attention")).proposals.map((item) => item.id)).not.toContain(proposal.id);
     expect(await store.readTargetContent(globalPrompt)).toBe(originalGlobal);
+  });
+
+  test("queues one compound pass and keeps its editable policy proposal approval-gated", async () => {
+    const { store, domain } = await setup();
+    const first = await domain.queueCompound("inbox");
+    const second = await domain.queueCompound("inbox");
+    expect(second.id).toBe(first.id);
+
+    const target = { kind: "feed" as const, feedId: "inbox" };
+    const original = await store.readTargetContent(target);
+    const proposal = await domain.proposeRevision("inbox", target, "Preserve the sweep's durable reply judgment.", `${original}\n\n- Prefer concrete reply moves.`, "compound");
+    expect(proposal.source).toBe("compound");
+    expect(await store.readTargetContent(target)).toBe(original);
+
+    const edited = await domain.updateRevisionProposal(proposal.id, `${original}\n\n- Prefer concrete reply moves backed by the latest outcome.`);
+    expect(edited.next).toContain("latest outcome");
+    expect(await store.readTargetContent(target)).toBe(original);
+
+    await domain.applyRevisionProposal(proposal.id);
+    expect(await store.readTargetContent(target)).toContain("latest outcome");
+    expect((await store.readEvents("inbox")).map((event) => event.type)).toEqual(expect.arrayContaining([
+      "learning.compound_queued",
+      "revision.proposed",
+      "revision.proposal_updated",
+      "revision.applied",
+    ]));
   });
 });

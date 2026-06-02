@@ -9,6 +9,7 @@ import type {
   FeedView,
   PolicyRevision,
   RevisionProposal,
+  RoutineActionGroup,
   SourceRecipe,
   SweepBatch,
   SweepFeedbackTrace,
@@ -219,15 +220,17 @@ export class AttentionStore {
 
   async readFeed(feedId: string): Promise<FeedView> {
     const config = await this.readConfig(feedId);
-    const [thread, sources, policy, cards, work, sweep] = await Promise.all([
+    const [thread, sources, policy, cards, routineActions, work, sweep] = await Promise.all([
       readJson<ThreadBinding>(this.feedPath(feedId, "thread.json")),
       readJson<SourceRecipe[]>(this.feedPath(feedId, "sources.json")),
       readFile(this.feedPath(feedId, "policy.md"), "utf8"),
       this.readDirectoryJson<Card>(this.feedPath(feedId, "cards")),
+      this.readDirectoryJson<RoutineActionGroup>(this.feedPath(feedId, "routine-actions")),
       this.readDirectoryJson<WorkItem>(this.feedPath(feedId, "work")),
       this.readSweepState(feedId),
     ]);
     cards.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    routineActions.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     work.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     return {
       config,
@@ -235,6 +238,7 @@ export class AttentionStore {
       sources,
       policy,
       cards,
+      routineActions,
       work,
       sweep,
       readyNextPass: cards.filter((card) => card.status === "to_review_updated" && card.readyForPass > config.currentPass).length,
@@ -289,6 +293,15 @@ export class AttentionStore {
 
   async removeCard(feedId: string, cardId: string): Promise<void> {
     await rm(this.feedPath(feedId, "cards", `${cardId}.json`), { force: true });
+  }
+
+  async readRoutineActionGroup(feedId: string, groupId: string): Promise<RoutineActionGroup> {
+    return readJson<RoutineActionGroup>(this.feedPath(feedId, "routine-actions", `${groupId}.json`));
+  }
+
+  async writeRoutineActionGroup(group: RoutineActionGroup): Promise<void> {
+    group.updatedAt = isoNow();
+    await writeJson(this.feedPath(group.feedId, "routine-actions", `${group.id}.json`), group);
   }
 
   async readWork(feedId: string, workId: string): Promise<WorkItem> {

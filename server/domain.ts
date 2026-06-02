@@ -2,11 +2,13 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import type {
   Card,
+  CardAction,
   CardBlock,
   FeedConfig,
   PolicyRevision,
   ProposedAction,
   RevisionProposal,
+  RoutineActionGroup,
   SourceRecipe,
   SweepFeedbackTrace,
   ThreadBinding,
@@ -23,10 +25,70 @@ function appendHistory(card: Card, type: string, detail?: string): void {
   card.history.push({ at: isoNow(), type, detail });
 }
 
-function actionDigest(card: Card): string {
-  const action = card.proposedAction;
+const INBOX_DEMO_REPLAY_SOURCE_IDS: Record<string, string> = {
+  "demo-inbox-partnership": "gmail-thread-19e8570055b2e4ed",
+  "demo-inbox-investor-followup": "gmail-thread-19e0f349c4e9039f",
+  "demo-inbox-scheduling": "gmail-thread-195952aa242e973c",
+  "demo-inbox-delegation": "gmail-thread-19e8496ed12388f3",
+  "demo-inbox-attachment": "gmail-thread-19e6ad9592b6f462",
+  "demo-inbox-routine-cleanup": "gmail-thread-19e7434a384dfe39",
+  "demo-inbox-intro": "gmail-thread-19e85140ab834ad2",
+};
+
+function configuredApprovalAction(card: Card, cardActionId?: string): ProposedAction {
+  if (!cardActionId) {
+    if (!card.proposedAction) throw new Error("Card has no proposed action.");
+    return card.proposedAction;
+  }
+  const action = card.actions?.find((item) => item.id === cardActionId);
+  if (!action || action.behavior !== "approve_action" || !action.instruction?.trim()) {
+    throw new Error("Card approval action not found.");
+  }
+  return {
+    label: action.label,
+    instruction: action.instruction,
+    ...(action.artifactBlockId ? { artifactBlockId: action.artifactBlockId } : {}),
+    ...(action.externalMutation !== undefined ? { externalMutation: action.externalMutation } : {}),
+    ...(action.mailboxPolicy ? { mailboxPolicy: action.mailboxPolicy } : {}),
+  };
+}
+
+function normalizeMailbox(mailbox?: string): string | undefined {
+  const normalized = mailbox?.trim().toLowerCase();
+  return normalized || undefined;
+}
+
+function requiresSourceMailboxMatch(feedId: string, action: ProposedAction): boolean {
+  return action.mailboxPolicy === "reply_from_source" ||
+    (feedId === "inbox" && action.externalMutation === true && Boolean(action.artifactBlockId));
+}
+
+function requiredSourceMailbox(feedId: string, card: Card, action: ProposedAction): string | undefined {
+  if (!requiresSourceMailboxMatch(feedId, action)) return undefined;
+  const sourceMailbox = normalizeMailbox(card.sourceMailbox);
+  if (!sourceMailbox) {
+    throw new Error("Email reply is missing the mailbox that received the source email.");
+  }
+  return sourceMailbox;
+}
+
+function verifySourceMailbox(feedId: string, card: Card, action: ProposedAction, authenticatedMailbox?: string): string | undefined {
+  const sourceMailbox = requiredSourceMailbox(feedId, card, action);
+  if (!sourceMailbox) return undefined;
+  const authenticated = normalizeMailbox(authenticatedMailbox);
+  if (!authenticated) {
+    throw new Error(`Email reply verification requires the authenticated Gmail mailbox. Expected ${sourceMailbox}.`);
+  }
+  if (authenticated !== sourceMailbox) {
+    throw new Error(`Authenticated Gmail mailbox mismatch: expected ${sourceMailbox}, got ${authenticated}.`);
+  }
+  return authenticated;
+}
+
+function actionDigest(card: Card, cardActionId?: string): string {
+  const action = configuredApprovalAction(card, cardActionId);
   const artifact = action?.artifactBlockId ? card.blocks.find((block) => block.id === action.artifactBlockId) : undefined;
-  return digest({ action, artifact });
+  return digest({ cardActionId: cardActionId ?? null, action, artifact });
 }
 
 function cleanupDigest(card: Card, instruction: string): string {
@@ -39,7 +101,19 @@ function cleanupDigest(card: Card, instruction: string): string {
       why: card.why,
       blocks: card.blocks,
       proposedAction: card.proposedAction,
+      actions: card.actions,
     },
+  });
+}
+
+function routineActionDigest(group: RoutineActionGroup): string {
+  return digest({
+    feedId: group.feedId,
+    id: group.id,
+    label: group.label,
+    summary: group.summary,
+    proposedAction: group.proposedAction,
+    items: group.items,
   });
 }
 
@@ -79,7 +153,7 @@ function revisionLabel(target: VoiceTarget): string {
   return "Attention policy";
 }
 
-function queuedWork(feedId: string, cardId: string, instruction: string, extra: Pick<WorkItem, "kind"> & Partial<Pick<WorkItem, "target" | "intent" | "feedbackId" | "startingBatchId" | "previousSweepState">>): WorkItem {
+function queuedWork(feedId: string, cardId: string, instruction: string, extra: Pick<WorkItem, "kind"> & Partial<Pick<WorkItem, "target" | "intent" | "feedbackId" | "startingBatchId" | "previousSweepState" | "approvalDigest" | "cardActionId" | "routineActionGroupId">>): WorkItem {
   const now = isoNow();
   return {
     id: makeId("work"),
@@ -96,6 +170,21 @@ function queuedWork(feedId: string, cardId: string, instruction: string, extra: 
 
 export class AttentionDomain {
   constructor(readonly store: AttentionStore) {}
+
+  private async releaseRoutineActionCards(group: RoutineActionGroup, returnForReview: boolean): Promise<void> {
+    const config = returnForReview ? await this.store.readConfig(group.feedId) : null;
+    for (const item of group.items) {
+      if (!item.cardId) continue;
+      const card = await this.store.readCard(group.feedId, item.cardId);
+      if (card.routineActionGroupId !== group.id) continue;
+      card.routineActionGroupId = undefined;
+      if (returnForReview && card.status !== "done") {
+        card.status = "to_review_updated";
+        card.readyForPass = config?.currentPass ?? card.readyForPass;
+      }
+      await this.store.writeCard(card);
+    }
+  }
 
   async detectLocalMonologue(options: { appPath?: string; settingsPath?: string } = {}) {
     const capability = await detectMonologue(options);
@@ -120,7 +209,8 @@ export class AttentionDomain {
           .filter((card) =>
             (card.status === "to_review_new" || card.status === "to_review_updated") &&
             card.readyForPass <= feed.config.currentPass &&
-            !card.sweep?.hidden
+            !card.sweep?.hidden &&
+            !card.routineActionGroupId
           )
           .map((card) => card.id);
         const trace: SweepFeedbackTrace = {
@@ -230,7 +320,7 @@ export class AttentionDomain {
     });
   }
 
-  async proposeRevision(anchorFeedId: string, requested: VoiceTarget, instruction: string, next: string): Promise<RevisionProposal> {
+  async proposeRevision(anchorFeedId: string, requested: VoiceTarget, instruction: string, next: string, source: RevisionProposal["source"] = "voice"): Promise<RevisionProposal> {
     if (!instruction.trim()) throw new Error("Revision instruction is required.");
     if (!next.trim()) throw new Error("Proposed revision content is required.");
     const target = await this.store.validateVoiceTarget(requested);
@@ -245,11 +335,25 @@ export class AttentionDomain {
         instruction: instruction.trim(),
         previous,
         next: next.trim(),
+        source,
         status: "proposed",
         createdAt: isoNow(),
       };
       await this.store.writeRevisionProposal(proposal);
       await this.store.appendEvent({ feedId: anchorFeedId, type: "revision.proposed", detail: { proposalId: proposal.id, target } });
+      return proposal;
+    });
+  }
+
+  async updateRevisionProposal(proposalId: string, next: string): Promise<RevisionProposal> {
+    if (!next.trim()) throw new Error("Proposed revision content is required.");
+    return this.store.serialize(async () => {
+      const proposal = await this.store.readRevisionProposal(proposalId);
+      if (proposal.status !== "proposed") throw new Error("Revision proposal is no longer pending.");
+      proposal.next = next.trim();
+      proposal.updatedAt = isoNow();
+      await this.store.writeRevisionProposal(proposal);
+      await this.store.appendEvent({ feedId: proposal.anchorFeedId, type: "revision.proposal_updated", detail: { proposalId, target: proposal.target } });
       return proposal;
     });
   }
@@ -348,13 +452,14 @@ export class AttentionDomain {
     });
   }
 
-  async approveAction(feedId: string, cardId: string): Promise<WorkItem> {
+  async approveAction(feedId: string, cardId: string, cardActionId?: string): Promise<WorkItem> {
     return this.store.serialize(async () => {
       const card = await this.store.readCard(feedId, cardId);
-      if (!card.proposedAction) throw new Error("Card has no proposed action.");
       if (card.status === "done") throw new Error("Done cards cannot be approved.");
+      const action = configuredApprovalAction(card, cardActionId);
+      requiredSourceMailbox(feedId, card, action);
       const now = isoNow();
-      const approvalDigest = actionDigest(card);
+      const approvalDigest = actionDigest(card, cardActionId);
       const feed = await this.store.readFeed(feedId);
       const active = feed.work.filter((work) => work.cardId === cardId && work.kind === "execute_approved_action" && (work.status === "queued" || work.status === "working"));
       const existing = active.find((work) => work.approvalDigest === approvalDigest);
@@ -371,10 +476,11 @@ export class AttentionDomain {
         feedId,
         cardId,
         kind: "execute_approved_action",
-        instruction: card.proposedAction.instruction,
+        instruction: action.instruction,
         status: "queued",
         capabilityToken: makeToken(),
         approvalDigest,
+        ...(cardActionId ? { cardActionId } : {}),
         createdAt: now,
         updatedAt: now,
       };
@@ -385,6 +491,18 @@ export class AttentionDomain {
       await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "action.approved", detail: { approvalDigest } });
       return work;
     });
+  }
+
+  async runCardAction(feedId: string, cardId: string, cardActionId: string): Promise<WorkItem> {
+    if (cardActionId === "default-cleanup") return this.dismissCard(feedId, cardId);
+    if (cardActionId === "proposed-action") return this.approveAction(feedId, cardId);
+    const card = await this.store.readCard(feedId, cardId);
+    const action = card.actions?.find((item) => item.id === cardActionId);
+    if (!action) throw new Error("Card action not found.");
+    if (action.behavior === "default_cleanup") return this.dismissCard(feedId, cardId);
+    if (!action.instruction?.trim()) throw new Error("Card action instruction is required.");
+    if (action.behavior === "queue_instruction") return this.queueInstruction(feedId, cardId, action.instruction);
+    return this.approveAction(feedId, cardId, action.id);
   }
 
   async dismissCard(feedId: string, cardId: string): Promise<WorkItem> {
@@ -426,6 +544,82 @@ export class AttentionDomain {
     });
   }
 
+  async upsertRoutineActionGroup(feedId: string, input: Pick<RoutineActionGroup, "id" | "label" | "summary" | "proposedAction" | "items">): Promise<RoutineActionGroup> {
+    if (!input.id.trim() || !input.label.trim() || !input.summary.trim()) throw new Error("Routine action group id, label, and summary are required.");
+    if (!input.proposedAction.label.trim() || !input.proposedAction.instruction.trim()) throw new Error("Routine action group approval needs a visible label and exact instruction.");
+    if (!input.items.length) throw new Error("Routine action group needs at least one item.");
+    const itemIds = input.items.map((item) => item.id);
+    const cardIds = input.items.flatMap((item) => item.cardId ? [item.cardId] : []);
+    if (new Set(itemIds).size !== itemIds.length) throw new Error("Routine action item IDs must be unique.");
+    if (new Set(cardIds).size !== cardIds.length) throw new Error("A card cannot appear twice in one routine action group.");
+    return this.store.serialize(async () => {
+      const existingPath = this.store.feedPath(feedId, "routine-actions", `${input.id}.json`);
+      const existing = existsSync(existingPath) ? await this.store.readRoutineActionGroup(feedId, input.id) : null;
+      if (existing && (existing.status === "queued" || existing.status === "working" || existing.status === "completed")) {
+        throw new Error("Routine action group cannot change after approval or completion.");
+      }
+      for (const item of input.items) {
+        if (!item.id.trim() || !item.title.trim() || !item.reason.trim()) throw new Error("Routine action items need an id, title, and reason.");
+        if (!item.cardId) continue;
+        const card = await this.store.readCard(feedId, item.cardId);
+        if (card.status !== "to_review_new" && card.status !== "to_review_updated") throw new Error(`Routine action card is no longer reviewable: ${card.id}`);
+        if (card.routineActionGroupId && card.routineActionGroupId !== input.id) throw new Error(`Routine action card already belongs to another group: ${card.id}`);
+      }
+      if (existing) await this.releaseRoutineActionCards(existing, false);
+      const now = isoNow();
+      const group: RoutineActionGroup = {
+        id: input.id.trim(),
+        feedId,
+        label: input.label.trim(),
+        summary: input.summary.trim(),
+        proposedAction: input.proposedAction,
+        items: input.items.map((item) => ({ ...item, id: item.id.trim(), title: item.title.trim(), reason: item.reason.trim() })),
+        status: "proposed",
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      for (const item of group.items) {
+        if (!item.cardId) continue;
+        const card = await this.store.readCard(feedId, item.cardId);
+        card.routineActionGroupId = group.id;
+        appendHistory(card, "routine_action.proposed", group.id);
+        await this.store.writeCard(card);
+      }
+      await this.store.writeRoutineActionGroup(group);
+      await this.store.appendEvent({ feedId, type: "routine_action.proposed", detail: { groupId: group.id, items: group.items.length } });
+      return group;
+    });
+  }
+
+  async approveRoutineActionGroup(feedId: string, groupId: string): Promise<WorkItem> {
+    return this.store.serialize(async () => {
+      const group = await this.store.readRoutineActionGroup(feedId, groupId);
+      const approvalDigest = routineActionDigest(group);
+      const feed = await this.store.readFeed(feedId);
+      const active = feed.work.filter((work) => work.kind === "routine_action_batch" && work.routineActionGroupId === groupId && (work.status === "queued" || work.status === "working"));
+      const existing = active.find((work) => work.approvalDigest === approvalDigest);
+      if (existing) return existing;
+      if (group.status !== "proposed") throw new Error("Routine action group is no longer waiting for approval.");
+      if (active.some((work) => work.status === "working")) throw new Error("An older routine action snapshot is already in progress.");
+      for (const work of active) {
+        work.status = "stale";
+        work.error = "Approval stale - a newer routine action snapshot was approved.";
+        await this.store.writeWork(work);
+      }
+      const work = queuedWork(feedId, "__routine__", group.proposedAction.instruction, {
+        kind: "routine_action_batch",
+        routineActionGroupId: group.id,
+        approvalDigest,
+      });
+      group.status = "queued";
+      group.workId = work.id;
+      await this.store.writeWork(work);
+      await this.store.writeRoutineActionGroup(group);
+      await this.store.appendEvent({ feedId, workId: work.id, type: "routine_action.approved", detail: { groupId: group.id, approvalDigest, items: group.items.length } });
+      return work;
+    });
+  }
+
   async undoDismiss(feedId: string, cardId: string): Promise<Card> {
     return this.store.serialize(async () => {
       const feed = await this.store.readFeed(feedId);
@@ -447,8 +641,9 @@ export class AttentionDomain {
     return this.store.serialize(async () => {
       const card = await this.store.readCard(feedId, cardId);
       const block = card.blocks.find((item) => item.id === blockId);
-      if (!block || !block.editable) throw new Error("Editable card block not found.");
+      if (!block || block.type !== "editable_text") throw new Error("Editable card block not found.");
       block.value = value;
+      block.editable = true;
       appendHistory(card, "user.edited_artifact", blockId);
       await this.store.writeCard(card);
       await this.store.appendEvent({ feedId, cardId, type: "card.block_edited", detail: { blockId } });
@@ -468,13 +663,16 @@ export class AttentionDomain {
 
   async queueCompound(feedId: string): Promise<WorkItem> {
     return this.store.serialize(async () => {
+      const feed = await this.store.readFeed(feedId);
+      const existing = feed.work.find((work) => work.kind === "compound_learnings" && (work.status === "queued" || work.status === "working"));
+      if (existing) return existing;
       const now = isoNow();
       const work: WorkItem = {
         id: makeId("work"),
         feedId,
         cardId: "__feed__",
         kind: "compound_learnings",
-        instruction: "Compound the feed learnings. Review raw snapshots, runs, events, outcomes, and policy history. Apply narrow reversible feed-specific improvements and surface structural proposals as review cards.",
+        instruction: "The user approved a learning pass. Review raw snapshots, runs, events, outcomes, and policy history. Distill a compact feed-policy improvement, then create an editable revision proposal with revision:propose --source compound. Do not apply it. The browser will bring the proposal back to the user for review.",
         status: "queued",
         capabilityToken: makeToken(),
         createdAt: now,
@@ -503,7 +701,12 @@ export class AttentionDomain {
       work.status = "working";
       work.claimedAt = isoNow();
       await this.store.writeWork(work);
-      if (work.cardId !== "__feed__") {
+      if (work.kind === "routine_action_batch" && work.routineActionGroupId) {
+        const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
+        group.status = "working";
+        group.workId = work.id;
+        await this.store.writeRoutineActionGroup(group);
+      } else if (work.cardId !== "__feed__") {
         const card = await this.store.readCard(feedId, work.cardId);
         card.status = "working";
         appendHistory(card, "codex.claimed", work.id);
@@ -521,7 +724,13 @@ export class AttentionDomain {
       work.status = "cancelled";
       work.error = reason.trim() || "Cancelled before Codex started work.";
       await this.store.writeWork(work);
-      if (work.cardId !== "__feed__") {
+      if (work.kind === "routine_action_batch" && work.routineActionGroupId) {
+        const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
+        group.status = "proposed";
+        group.workId = undefined;
+        group.error = undefined;
+        await this.store.writeRoutineActionGroup(group);
+      } else if (work.cardId !== "__feed__") {
         const feed = await this.store.readFeed(feedId);
         const card = await this.store.readCard(feedId, work.cardId);
         const hasActiveWork = feed.work.some((item) => item.id !== work.id && item.cardId === work.cardId && (item.status === "queued" || item.status === "working"));
@@ -543,7 +752,7 @@ export class AttentionDomain {
     });
   }
 
-  async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; done?: boolean }): Promise<WorkItem> {
+  async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; actions?: CardAction[]; done?: boolean }): Promise<WorkItem> {
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Work item is not currently claimed.");
@@ -564,12 +773,43 @@ export class AttentionDomain {
         if (batch.createdAt < work.createdAt) throw new Error("Source recollection completed with a sweep batch that predates the request.");
         if (batch.triggerWorkId !== work.id) throw new Error("Source recollection must complete with a sweep batch recorded for this work item.");
       }
-      if (work.cardId !== "__feed__") {
+      if (work.kind === "routine_action_batch") {
+        if (!work.routineActionGroupId || !work.approvalDigest) throw new Error("Routine action work is missing its approved snapshot.");
+        const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
+        if (work.approvalDigest !== routineActionDigest(group)) {
+          work.status = "stale";
+          work.error = "Approval stale - the routine action group changed after approval.";
+          group.status = "stale";
+          group.error = work.error;
+          await this.releaseRoutineActionCards(group, true);
+          await this.store.writeWork(work);
+          await this.store.writeRoutineActionGroup(group);
+          await this.store.appendEvent({ feedId, workId, type: "routine_action.stale", detail: { groupId: group.id } });
+          throw new Error(work.error);
+        }
+        if (work.verifiedApprovalDigest !== work.approvalDigest) {
+          throw new Error("Approved action must pass action:verify immediately before the external mutation.");
+        }
+        for (const item of group.items) {
+          if (!item.cardId) continue;
+          const card = await this.store.readCard(feedId, item.cardId);
+          card.status = "done";
+          card.completedAt = isoNow();
+          appendHistory(card, "routine_action.completed", work.id);
+          await this.store.writeCard(card);
+        }
+        group.status = "completed";
+        group.completedAt = isoNow();
+        group.error = undefined;
+        await this.store.writeRoutineActionGroup(group);
+      } else if (work.cardId !== "__feed__") {
         const card = await this.store.readCard(feedId, work.cardId);
-        const approvalDigest = work.kind === "default_cleanup"
-          ? cleanupDigest(card, (await this.store.readConfig(feedId)).defaultCleanup)
-          : actionDigest(card);
-        if (work.approvalDigest && work.approvalDigest !== approvalDigest) {
+        const currentApprovalDigest = work.approvalDigest
+          ? work.kind === "default_cleanup"
+            ? cleanupDigest(card, (await this.store.readConfig(feedId)).defaultCleanup)
+            : actionDigest(card, work.cardActionId)
+          : undefined;
+        if (work.approvalDigest !== currentApprovalDigest) {
           work.status = "stale";
           work.error = "Approval stale - the proposed action or artifact changed after approval.";
           card.status = "to_review_updated";
@@ -580,9 +820,23 @@ export class AttentionDomain {
           await this.store.appendEvent({ feedId, cardId: card.id, workId, type: "action.stale" });
           throw new Error(work.error);
         }
+        if (
+          (work.kind === "execute_approved_action" || work.kind === "default_cleanup") &&
+          work.verifiedApprovalDigest !== work.approvalDigest
+        ) {
+          throw new Error("Approved action must pass action:verify immediately before the external mutation.");
+        }
+        if (work.kind === "execute_approved_action") {
+          const action = configuredApprovalAction(card, work.cardActionId);
+          const sourceMailbox = requiredSourceMailbox(feedId, card, action);
+          if (sourceMailbox && work.verifiedMailbox !== sourceMailbox) {
+            throw new Error(`Approved email reply must be reverified for ${sourceMailbox} before completion.`);
+          }
+        }
         if (result.blocks) card.blocks = result.blocks;
         if (result.proposedAction) card.proposedAction = result.proposedAction;
-        const done = Boolean(result.done || work.kind === "default_cleanup");
+        if (result.actions) card.actions = result.actions;
+        const done = Boolean(result.done || work.kind === "default_cleanup" || work.kind === "execute_approved_action");
         card.status = done ? "done" : "to_review_updated";
         card.completedAt = done ? isoNow() : undefined;
         card.readyForPass = (await this.store.readConfig(feedId)).currentPass + 1;
@@ -598,26 +852,46 @@ export class AttentionDomain {
     });
   }
 
-  async verifyApprovedAction(feedId: string, workId: string, token: string): Promise<{ approvalDigest: string; action: ProposedAction; artifact?: CardBlock }> {
-    const work = await this.store.readWork(feedId, workId);
-    if (work.status !== "working") throw new Error("Approved action work must be claimed before verification.");
-    if ((work.kind !== "execute_approved_action" && work.kind !== "default_cleanup") || !work.approvalDigest) throw new Error("Work item is not an approved action.");
-    if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
-    const card = await this.store.readCard(feedId, work.cardId);
-    if (work.kind === "default_cleanup") {
-      const config = await this.store.readConfig(feedId);
-      if (work.instruction !== config.defaultCleanup || work.approvalDigest !== cleanupDigest(card, config.defaultCleanup)) throw new Error("Approval stale - reread and return the card for review.");
-      return {
-        approvalDigest: work.approvalDigest,
-        action: { label: "Default cleanup", instruction: config.defaultCleanup },
-      };
-    }
-    if (!card.proposedAction || work.approvalDigest !== actionDigest(card)) throw new Error("Approval stale - reread and return the card for review.");
-    return {
-      approvalDigest: work.approvalDigest,
-      action: card.proposedAction,
-      artifact: card.proposedAction.artifactBlockId ? card.blocks.find((block) => block.id === card.proposedAction?.artifactBlockId) : undefined,
-    };
+  async verifyApprovedAction(feedId: string, workId: string, token: string, authenticatedMailbox?: string): Promise<{ approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string }> {
+    return this.store.serialize(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if (work.status !== "working") throw new Error("Approved action work must be claimed before verification.");
+      if ((work.kind !== "execute_approved_action" && work.kind !== "default_cleanup" && work.kind !== "routine_action_batch") || !work.approvalDigest) throw new Error("Work item is not an approved action.");
+      if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
+      let result: { approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string };
+      if (work.kind === "routine_action_batch") {
+        if (!work.routineActionGroupId) throw new Error("Routine action work is missing its group.");
+        const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
+        if (work.approvalDigest !== routineActionDigest(group)) throw new Error("Approval stale - reread and return the routine action group for review.");
+        result = { approvalDigest: work.approvalDigest, action: group.proposedAction };
+      } else {
+        const card = await this.store.readCard(feedId, work.cardId);
+        if (work.kind === "default_cleanup") {
+          const config = await this.store.readConfig(feedId);
+          if (work.instruction !== config.defaultCleanup || work.approvalDigest !== cleanupDigest(card, config.defaultCleanup)) throw new Error("Approval stale - reread and return the card for review.");
+          result = {
+            approvalDigest: work.approvalDigest,
+            action: { label: "Default cleanup", instruction: config.defaultCleanup },
+          };
+        } else {
+          const action = configuredApprovalAction(card, work.cardActionId);
+          if (work.approvalDigest !== actionDigest(card, work.cardActionId)) throw new Error("Approval stale - reread and return the card for review.");
+          const verifiedMailbox = verifySourceMailbox(feedId, card, action, authenticatedMailbox);
+          result = {
+            approvalDigest: work.approvalDigest,
+            action,
+            artifact: action.artifactBlockId ? card.blocks.find((block) => block.id === action.artifactBlockId) : undefined,
+            ...(verifiedMailbox ? { verifiedMailbox } : {}),
+          };
+        }
+      }
+      work.verifiedAt = isoNow();
+      work.verifiedApprovalDigest = work.approvalDigest;
+      work.verifiedMailbox = result.verifiedMailbox;
+      await this.store.writeWork(work);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "action.verified", detail: { verifiedMailbox: work.verifiedMailbox } });
+      return result;
+    });
   }
 
   async failWork(feedId: string, workId: string, token: string, error: string): Promise<WorkItem> {
@@ -628,7 +902,13 @@ export class AttentionDomain {
       work.status = "failed";
       work.error = error.trim() || "Codex could not complete this work.";
       await this.store.writeWork(work);
-      if (work.cardId !== "__feed__") {
+      if (work.kind === "routine_action_batch" && work.routineActionGroupId) {
+        const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
+        group.status = "failed";
+        group.error = work.error;
+        await this.releaseRoutineActionCards(group, true);
+        await this.store.writeRoutineActionGroup(group);
+      } else if (work.cardId !== "__feed__") {
         const config = await this.store.readConfig(feedId);
         const card = await this.store.readCard(feedId, work.cardId);
         card.status = "to_review_updated";
@@ -649,6 +929,72 @@ export class AttentionDomain {
         }
       }
       await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.failed", detail: { error: work.error } });
+      return work;
+    });
+  }
+
+  async blockApprovedWork(feedId: string, workId: string, token: string, error: string): Promise<WorkItem> {
+    return this.store.serialize(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if (work.status !== "working") throw new Error("Work item is not currently claimed.");
+      if (work.kind !== "execute_approved_action" || !work.approvalDigest) throw new Error("Only approved actions can wait for a retry.");
+      if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
+      const card = await this.store.readCard(feedId, work.cardId);
+      if (work.approvalDigest !== actionDigest(card, work.cardActionId)) {
+        work.status = "stale";
+        work.error = "Approval stale - the proposed action or artifact changed after approval.";
+        card.status = "to_review_updated";
+        card.readyForPass = (await this.store.readConfig(feedId)).currentPass + 1;
+        appendHistory(card, "codex.stale_approval", work.id);
+        await this.store.writeWork(work);
+        await this.store.writeCard(card);
+        await this.store.appendEvent({ feedId, cardId: card.id, workId, type: "action.stale" });
+        throw new Error(work.error);
+      }
+      work.status = "approved_blocked";
+      work.error = error.trim() || "The approved action is waiting for Codex to retry.";
+      work.updatedAt = isoNow();
+      card.status = "approved_blocked";
+      appendHistory(card, "codex.approved_action_blocked", work.error);
+      await this.store.writeWork(work);
+      await this.store.writeCard(card);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.approved_action_blocked", detail: { error: work.error } });
+      return work;
+    });
+  }
+
+  async retryApprovedWork(feedId: string, workId: string): Promise<WorkItem> {
+    return this.store.serialize(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if ((work.status !== "approved_blocked" && work.status !== "failed") || work.kind !== "execute_approved_action" || !work.approvalDigest) {
+        throw new Error("Only an approved blocked action can be retried.");
+      }
+      const card = await this.store.readCard(feedId, work.cardId);
+      requiredSourceMailbox(feedId, card, configuredApprovalAction(card, work.cardActionId));
+      if (work.approvalDigest !== actionDigest(card, work.cardActionId)) {
+        work.status = "stale";
+        work.error = "Approval stale - the proposed action or artifact changed after approval.";
+        card.status = "to_review_updated";
+        card.readyForPass = (await this.store.readConfig(feedId)).currentPass + 1;
+        appendHistory(card, "codex.stale_approval", work.id);
+        await this.store.writeWork(work);
+        await this.store.writeCard(card);
+        await this.store.appendEvent({ feedId, cardId: card.id, workId, type: "action.stale" });
+        throw new Error(work.error);
+      }
+      work.status = "queued";
+      work.capabilityToken = makeToken();
+      work.updatedAt = isoNow();
+      work.claimedAt = undefined;
+      work.error = undefined;
+      work.verifiedAt = undefined;
+      work.verifiedApprovalDigest = undefined;
+      work.verifiedMailbox = undefined;
+      card.status = "queued";
+      appendHistory(card, "codex.approved_action_retry_queued", work.id);
+      await this.store.writeWork(work);
+      await this.store.writeCard(card);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.approved_action_retry_queued" });
       return work;
     });
   }
@@ -674,6 +1020,7 @@ export class AttentionDomain {
         { id: "clarify", type: "clarification", label: "Next step", text: "Wake this feed's Codex thread or use the dock. Codex will propose sources in plain English before collecting." },
       ],
       proposedAction: { label: "Propose source recipe", instruction: "Based on this feed brief, propose the smallest useful real source recipe and a heartbeat cadence. Return the proposal for review before collecting." },
+      actions: [{ id: "propose-source-recipe", label: "Propose source recipe", behavior: "queue_instruction", instruction: "Based on this feed brief, propose the smallest useful real source recipe and a heartbeat cadence. Return the proposal for review before collecting.", variant: "primary", shortcut: "p" }],
       readyForPass: 1,
       createdAt: now,
       updatedAt: now,
@@ -704,6 +1051,7 @@ export class AttentionDomain {
       const now = isoNow();
       const existingPath = this.store.feedPath(feedId, "cards", `${input.id}.json`);
       const existing = existsSync(existingPath) ? await this.store.readCard(feedId, input.id) : null;
+      const resurfaced = input.status === "to_review_new" || input.status === "to_review_updated";
       const card: Card = {
         id: input.id,
         feedId,
@@ -712,12 +1060,15 @@ export class AttentionDomain {
         eyebrow: input.eyebrow ?? existing?.eyebrow ?? config.name,
         title: input.title,
         why: input.why,
+        sourceMailbox: input.sourceMailbox ?? existing?.sourceMailbox,
         blocks: input.blocks,
         proposedAction: input.proposedAction,
+        actions: input.actions,
         readyForPass: input.readyForPass ?? existing?.readyForPass ?? config.currentPass,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
         completedAt: input.completedAt,
+        routineActionGroupId: input.routineActionGroupId ?? (resurfaced ? undefined : existing?.routineActionGroupId),
         history: existing?.history ?? [],
       };
       await this.store.writeCard(card);
@@ -739,6 +1090,7 @@ export class AttentionDomain {
       why: "Codex found a structural improvement worth reviewing explicitly before it changes the feed.",
       blocks: [{ id: "proposal", type: "memo", label: "Proposal", text: brief.trim() }],
       proposedAction: { label: "Apply this improvement", instruction: instruction.trim() },
+      actions: [{ id: "apply-improvement", label: "Apply improvement", behavior: "approve_action", instruction: instruction.trim(), variant: "primary", shortcut: "a" }],
       readyForPass: config.currentPass + 1,
       createdAt: now,
       updatedAt: now,
@@ -758,17 +1110,17 @@ export class AttentionDomain {
     return this.store.serialize(() => this.store.revertPolicy(feedId, revisionId));
   }
 
-  async seedDemo(): Promise<void> {
-    for (const feedId of ["inbox", "company-attention"]) {
-      for (const card of demoCards(feedId)) {
+  async seedDemo(onlyFeedId?: string): Promise<void> {
+    for (const feedId of onlyFeedId ? [onlyFeedId] : ["inbox", "company-attention"]) {
+      for (const card of await this.demoReplayCards(feedId)) {
         if (!existsSync(this.store.feedPath(feedId, "cards", `${card.id}.json`))) await this.store.writeCard(card);
       }
     }
   }
 
-  async clearDemo(): Promise<void> {
+  async clearDemo(onlyFeedId?: string): Promise<void> {
     await this.store.serialize(async () => {
-      for (const feedId of ["inbox", "company-attention"]) {
+      for (const feedId of onlyFeedId ? [onlyFeedId] : ["inbox", "company-attention"]) {
         for (const card of demoCards(feedId)) await this.store.removeCard(feedId, card.id);
         await this.store.appendEvent({ feedId, type: "demo.cleared" });
       }
@@ -777,6 +1129,30 @@ export class AttentionDomain {
 
   async archiveFeed(feedId: string): Promise<void> {
     await this.store.archiveFeed(feedId);
+  }
+
+  private async demoReplayCards(feedId: string): Promise<Card[]> {
+    const cards = demoCards(feedId);
+    if (feedId !== "inbox") return cards;
+    return Promise.all(cards.map(async (card) => {
+      const sourceId = INBOX_DEMO_REPLAY_SOURCE_IDS[card.id];
+      if (!sourceId) return card;
+      try {
+        const source = await this.store.readCard(feedId, sourceId);
+        return {
+          ...card,
+          eyebrow: `Demo replay · ${source.eyebrow}`,
+          title: source.title,
+          why: source.why,
+          blocks: [
+            ...source.blocks,
+            { id: "demo", type: "receipt", label: "Demo replay", text: "Local replay of a previously handled email. Buttons below simulate the workflow only; they do not touch Gmail or Calendar." },
+          ],
+        };
+      } catch {
+        return card;
+      }
+    }));
   }
 
   async recordSourceRun(feedId: string, sourceId: string, snapshots: unknown[], judgments: unknown[], checkpoint: unknown, triggerWorkId?: string): Promise<string> {
