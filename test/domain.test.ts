@@ -3,7 +3,9 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import { AttentionDomain } from "../server/domain";
+import { formatWorkClaimOutput, formatWorkListOutput } from "../server/operator";
 import { AttentionStore } from "../server/store";
+import type { WorkItem } from "../src/types";
 import { closestTarget, preferredTarget } from "../src/state/voiceTarget";
 
 const roots: string[] = [];
@@ -18,6 +20,27 @@ async function setup() {
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("feed thread operator handshake", () => {
+  test("offers a compound pass when a work list or claim reaches idle", () => {
+    const idleList = formatWorkListOutput("hiring", []);
+    const idleClaim = formatWorkClaimOutput("hiring", null);
+
+    expect(idleList).toMatchObject({
+      status: "idle",
+      next: "offer_compound_if_sweep_finished",
+    });
+    expect(idleClaim).toEqual(idleList);
+    expect(idleClaim.compound.ifApproved).toContain("learning:request --feed hiring");
+    expect(idleClaim.message).toContain("Want me to compound what I learned from this sweep?");
+  });
+
+  test("keeps pending work output unchanged", () => {
+    const work = { id: "work-1" } as WorkItem;
+    expect(formatWorkListOutput("inbox", [work])).toEqual([work]);
+    expect(formatWorkClaimOutput("inbox", work)).toBe(work);
+  });
 });
 
 describe("filesystem workspace", () => {
