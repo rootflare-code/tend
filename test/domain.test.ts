@@ -5,6 +5,7 @@ import path from "node:path";
 import { AttentionDomain } from "../server/domain";
 import { formatWorkClaimOutput, formatWorkListOutput } from "../server/operator";
 import { AttentionStore } from "../server/store";
+import { inspectRuntimeDrift, reconcileMissingRuntimeFiles } from "../server/runtime";
 import type { WorkItem } from "../src/types";
 import { closestTarget, preferredTarget } from "../src/state/voiceTarget";
 
@@ -104,6 +105,41 @@ describe("filesystem workspace", () => {
     await expect(domain.archiveFeed("inbox")).rejects.toThrow("Default feeds");
   });
 
+  test("records app feedback durably without turning it into a feed rule change", async () => {
+    const { store, domain } = await setup();
+    const feedback = await domain.recordAppFeedback("company-attention", "Archive action disappeared", "Cards with custom actions still need the default Archive action.", "thread-company");
+    expect(feedback).toMatchObject({
+      feedId: "company-attention",
+      title: "Archive action disappeared",
+      sourceThreadId: "thread-company",
+      status: "open",
+    });
+    expect(await store.readAppFeedback()).toEqual([feedback]);
+    expect((await store.readEvents("company-attention")).map((event) => event.type)).toContain("app.feedback_recorded");
+    expect((await domain.resolveAppFeedback(feedback.id, "Retained Archive beside custom actions.")).status).toBe("resolved");
+    expect((await store.readEvents("company-attention")).map((event) => event.type)).toContain("app.feedback_resolved");
+  });
+
+  test("copies only missing late runtime files and reports mutable conflicts", async () => {
+    const live = await mkdtemp(path.join(os.tmpdir(), "attention-live-"));
+    const legacy = await mkdtemp(path.join(os.tmpdir(), "attention-legacy-"));
+    roots.push(live, legacy);
+    await mkdir(path.join(live, "feeds", "hiring"), { recursive: true });
+    await mkdir(path.join(legacy, "feeds", "hiring", "raw", "run-late", "source-late"), { recursive: true });
+    await mkdir(path.join(legacy, "feeds", "hiring", "cards"), { recursive: true });
+    await writeFile(path.join(live, "feeds", "hiring", "policy.md"), "live policy\n");
+    await writeFile(path.join(legacy, "feeds", "hiring", "policy.md"), "legacy policy\n");
+    await writeFile(path.join(legacy, "feeds", "hiring", "raw", "run-late", "source-late", "snapshot.json"), "{}\n");
+    await writeFile(path.join(legacy, "feeds", "hiring", "cards", "late.json"), "{}\n");
+    const report = await reconcileMissingRuntimeFiles(live, legacy);
+    expect(report.copied).toEqual(["feeds/hiring/raw/run-late/source-late/snapshot.json"]);
+    expect(report.conflicts.map((entry) => entry.path)).toEqual(["feeds/hiring/policy.md"]);
+    expect(report.manualReview.map((entry) => entry.path)).toEqual(["feeds/hiring/cards/late.json"]);
+    expect(await readFile(path.join(live, "feeds", "hiring", "policy.md"), "utf8")).toBe("live policy\n");
+    expect(await readFile(path.join(live, "feeds", "hiring", "raw", "run-late", "source-late", "snapshot.json"), "utf8")).toBe("{}\n");
+    expect((await inspectRuntimeDrift(live, legacy)).entries.map((entry) => entry.path)).toEqual(["feeds/hiring/cards/late.json", "feeds/hiring/policy.md"]);
+  });
+
   test("normalizes escaped newlines and removes a source recipe without deleting evidence files", async () => {
     const { root, domain, store } = await setup();
     const source = await domain.addSourceFromBrief("company-attention", "Local pulse artifact\\nRead the current ignored JSON batch.");
@@ -172,6 +208,35 @@ describe("thread-owned work drain", () => {
     expect((await domain.cancelQueuedWork("inbox", queued.id, "Accidental dictation.")).status).toBe("cancelled");
     expect((await store.readCard("inbox", "inbox-ready-to-collect")).status).toBe("to_review_updated");
     await expect(domain.claimWork("inbox", "thread-inbox")).rejects.toThrow("no bound home thread");
+  });
+
+  test("edits a dictated card note while it is still queued", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    const queued = await domain.queueInstruction("inbox", "inbox-ready-to-collect", "Stray dictated text.");
+    expect((await domain.updateQueuedWorkInstruction("inbox", queued.id, "Corrected note.")).instruction).toBe("Corrected note.");
+    expect((await store.readCard("inbox", "inbox-ready-to-collect")).history.at(-1)).toMatchObject({
+      type: "user.edited_queued_instruction",
+      detail: "Corrected note.",
+    });
+    await domain.claimWork("inbox", "thread-inbox");
+    await expect(domain.updateQueuedWorkInstruction("inbox", queued.id, "Too late.")).rejects.toThrow("Only queued notes");
+  });
+
+  test("moves queued and done cards back to review without reviving stale work", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    const first = await domain.queueInstruction("inbox", "inbox-ready-to-collect", "First note.");
+    const second = await domain.queueInstruction("inbox", "inbox-ready-to-collect", "Second note.");
+    expect((await domain.returnCardToReview("inbox", "inbox-ready-to-collect")).status).toBe("to_review_updated");
+    expect((await store.readWork("inbox", first.id)).status).toBe("cancelled");
+    expect((await store.readWork("inbox", second.id)).status).toBe("cancelled");
+
+    const replay = await domain.queueInstruction("inbox", "inbox-ready-to-collect", "Handle this.");
+    await domain.claimWork("inbox", "thread-inbox");
+    await expect(domain.returnCardToReview("inbox", "inbox-ready-to-collect")).rejects.toThrow("already started");
+    await domain.completeWork("inbox", replay.id, replay.capabilityToken, { response: "Done.", done: true });
+    expect((await domain.returnCardToReview("inbox", "inbox-ready-to-collect")).status).toBe("to_review_updated");
   });
 
   test("requires the home thread unless cross-feed work is explicit", async () => {
@@ -707,7 +772,7 @@ describe("scoped persistent voice dock routing", () => {
   });
 
   test("rejects a rejudgment write-back after a newer sweep batch becomes active", async () => {
-    const { domain } = await setup();
+    const { store, domain } = await setup();
     await domain.seedDemo();
     await domain.bindFeed("company-attention", "thread-company");
     const firstRun = await domain.recordSourceRun("company-attention", "company-attention", [], [], { cursor: "first" });
@@ -718,6 +783,8 @@ describe("scoped persistent voice dock routing", () => {
     const secondRun = await domain.recordSourceRun("company-attention", "company-attention", [], [], { cursor: "second" });
     await domain.recordSweepBatch("company-attention", [secondRun]);
     await expect(domain.recordSweepRejudgment("company-attention", result.trace.id, result.trace.visibleCardIds, [])).rejects.toThrow("newer batch");
+    expect((await store.readWork("company-attention", result.work.id)).status).toBe("stale");
+    expect((await domain.listPendingWork("company-attention", "thread-company"))).toHaveLength(0);
   });
 
   test("rejects pre-batch feedback after the first sweep batch becomes active", async () => {

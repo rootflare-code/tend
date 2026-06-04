@@ -4,6 +4,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AttentionDomain } from "./server/domain";
+import { resolveArtifactsDir, resolveDataDir } from "./server/runtime";
 import { AttentionStore } from "./server/store";
 
 declare const Bun: {
@@ -11,8 +12,9 @@ declare const Bun: {
 };
 
 const root = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = process.env.ATTENTION_DATA_DIR ?? path.join(root, "data");
-const port = Number(process.env.ATTENTION_API_PORT ?? 4332);
+const dataDir = resolveDataDir(root);
+const artifactsDir = resolveArtifactsDir(root);
+const port = Number(process.env.ATTENTION_API_PORT ?? 4333);
 const store = new AttentionStore(dataDir);
 const domain = new AttentionDomain(store);
 await mkdir(dataDir, { recursive: true });
@@ -40,6 +42,7 @@ async function mutation(c: any, callback: () => Promise<unknown>) {
 }
 
 app.get("/api/state", async (c) => c.json(await store.readWorkspace(c.req.query("feed") ?? "inbox")));
+app.get("/api/health", (c) => c.json({ ok: true }));
 app.get("/api/artifacts/:name", async (c) => {
   const name = c.req.param("name");
   const artifactTypes: Record<string, { directory: string; contentType: string }> = {
@@ -51,7 +54,7 @@ app.get("/api/artifacts/:name", async (c) => {
   const artifactType = artifactTypes[path.extname(name).toLowerCase()];
   if (path.basename(name) !== name || !artifactType) return c.text("Artifact not found.", 404);
   try {
-    const contents = await readFile(path.join(root, "output", artifactType.directory, name));
+    const contents = await readFile(path.join(artifactsDir, artifactType.directory, name));
     return c.body(contents, 200, { "content-type": artifactType.contentType, "content-disposition": `inline; filename="${name}"` });
   } catch {
     return c.text("Artifact not found.", 404);
@@ -111,7 +114,9 @@ app.post("/api/feeds/:feed/cards/:card/actions/:action", async (c) => mutation(c
 app.post("/api/feeds/:feed/cards/:card/approve", async (c) => mutation(c, async () => domain.approveAction(c.req.param("feed"), c.req.param("card"))));
 app.post("/api/feeds/:feed/cards/:card/dismiss", async (c) => mutation(c, async () => domain.dismissCard(c.req.param("feed"), c.req.param("card"))));
 app.post("/api/feeds/:feed/cards/:card/undo-dismiss", async (c) => mutation(c, async () => domain.undoDismiss(c.req.param("feed"), c.req.param("card"))));
+app.post("/api/feeds/:feed/cards/:card/return-to-review", async (c) => mutation(c, async () => domain.returnCardToReview(c.req.param("feed"), c.req.param("card"))));
 app.post("/api/feeds/:feed/cards/:card/blocks/:block", async (c) => mutation(c, async () => domain.updateBlock(c.req.param("feed"), c.req.param("card"), c.req.param("block"), String((await body(c)).value ?? ""))));
+app.post("/api/feeds/:feed/work/:work/instruction", async (c) => mutation(c, async () => domain.updateQueuedWorkInstruction(c.req.param("feed"), c.req.param("work"), String((await body(c)).instruction ?? ""))));
 app.post("/api/feeds/:feed/next-pass", async (c) => mutation(c, async () => domain.beginNextPass(c.req.param("feed"))));
 app.post("/api/feeds/:feed/compound", async (c) => mutation(c, async () => domain.queueCompound(c.req.param("feed"))));
 app.post("/api/dev/demo", async (c) => mutation(c, async () => domain.seedDemo()));

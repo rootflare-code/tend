@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import type {
+  AppFeedback,
   Card,
   DictationCapability,
   FeedConfig,
@@ -138,6 +139,19 @@ export class AttentionStore {
 
   async writeRevisionProposal(proposal: RevisionProposal): Promise<void> {
     await writeJson(this.path("revision-proposals", `${proposal.id}.json`), proposal);
+  }
+
+  async readAppFeedback(): Promise<AppFeedback[]> {
+    return (await this.readDirectoryJson<AppFeedback>(this.path("app-feedback")))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async writeAppFeedback(feedback: AppFeedback): Promise<void> {
+    await writeJson(this.path("app-feedback", `${feedback.id}.json`), feedback);
+  }
+
+  async readAppFeedbackItem(feedbackId: string): Promise<AppFeedback> {
+    return readJson<AppFeedback>(this.path("app-feedback", `${feedbackId}.json`));
   }
 
   async readWorkspaceRevision(revisionId: string): Promise<WorkspaceRevision> {

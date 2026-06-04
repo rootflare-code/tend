@@ -1,6 +1,6 @@
-# Attention
+# Tend
 
-Attention is a Codex-native feed builder for the Codex desktop in-app browser. It turns authorized
+Tend is a Codex-native feed builder for the Codex desktop in-app browser. It turns authorized
 sources into calm card sweeps, lets the user talk naturally to the active card, and gives each feed
 an owned Codex thread that performs the judgment and work.
 
@@ -8,11 +8,21 @@ an owned Codex thread that performs the judgment and work.
 
 ```bash
 pnpm install
-pnpm start
+./bin/tend-live start
 ```
 
 Open `http://127.0.0.1:4321/` in the Codex in-app browser. The API listens on
-`http://127.0.0.1:4332/`.
+`http://127.0.0.1:4333/`.
+
+The launcher owns the live PID lock and health check. Pinned feed threads should only run
+`./bin/tend-live health` and operate through the API or CLI. They should not start servers, kill
+ports, or choose worktrees. Use `./bin/tend-live validate` for an isolated branch-validation server
+with temporary runtime state on ports `14321` and `14333`.
+
+When a feed thread finds a cross-app UX or code problem, it records the issue with
+`pnpm cli -- feedback:record ...` and hands the same concise packet to the `Improve Tend workflow`
+thread. Feed threads keep tending feeds end to end; the improvement lane owns product-code changes.
+Use `pnpm cli -- feedback:list` and `pnpm cli -- feedback:resolve ...` from that improvement lane.
 
 For a scrubbed visual walkthrough:
 
@@ -39,7 +49,7 @@ drain automatic after the user approves the proposed cadence.
 
 During local setup, Codex runs `pnpm cli -- setup:detect-monologue`. If Monologue is installed, Codex
 reads its local recording shortcut and records a safe browser-facing capability under ignored
-`data/integrations/`. Hold the detected shortcut while speaking. The dock receives focus on keydown
+`../.attention-workbench/data/integrations/`. Hold the detected shortcut while speaking. The dock receives focus on keydown
 and switches into a visible listening state, then automatically submits injected text shortly after
 keyup once the text settles. There is no clickable dictation control.
 
@@ -53,10 +63,19 @@ On Inbox cards, use `O` to toggle the collapsed full email thread without leavin
 
 ## Workspace
 
-Runtime data lives under ignored `data/`:
+The canonical local checkout is `/Users/danshipper/CascadeProjects/attention`. Runtime data lives
+outside any checkout under `../.attention-workbench/data/`, so a temporary validation worktree
+cannot silently create a second Tend state. `ATTENTION_RUNTIME_DIR`, `ATTENTION_DATA_DIR`, and
+`ATTENTION_ARTIFACTS_DIR` remain available for isolated tests.
+
+During a checkout migration, record the retired data directory with
+`pnpm cli -- runtime:mark-handoff --legacy-data <path>`. A later
+`pnpm cli -- runtime:reconcile --legacy-data <path> --apply-missing` copies only late immutable
+evidence files and reports cards, work items, policies, event ledgers, and mutable conflicts for
+review instead of overwriting shared state.
 
 ```text
-data/
+../.attention-workbench/data/
   global-policy.md
   integrations/dictation.json
   prompts/*.md
@@ -99,6 +118,8 @@ shared prompt layers directly.
 Cards may expose the concrete next moves that fit the source item instead of a generic approval
 pair. For example, a reply card can show `Archive` and `Send reply`, while an ambiguous invitation
 can show `Draft a yes`, `Draft a pass`, and `Research`. Preparation actions only queue Codex work.
+Queued cards keep their dictated note editable until Codex claims the work, and every queued card
+has a durable `Move back to review` control after the short-lived toast disappears.
 An external mutation still requires an exact visible approval bound to the selected action and
 current editable artifact. Inbox reply cards also show the mailbox that received the source email.
 Immediately before sending, Codex fetches the authenticated Gmail profile and passes that mailbox
@@ -114,6 +135,9 @@ pnpm cli -- feed:archive --feed <non-default-feed-id>
 pnpm cli -- work:list --feed inbox --thread <current-codex-thread-id>
 pnpm cli -- work:claim --feed inbox --thread <current-codex-thread-id>
 pnpm cli -- work:cancel --feed inbox --work <queued-work-id> --reason <text>
+pnpm cli -- work:edit --feed inbox --work <queued-work-id> --instruction <corrected-note>
+pnpm cli -- card:return-to-review --feed inbox --card <card-id>
+pnpm cli -- card:upsert --feed inbox --card-file <local-json-file>
 pnpm cli -- action:verify --feed inbox --work <approved-work-id> --token <token> --mailbox <authenticated-gmail-email>
 pnpm cli -- work:complete --feed inbox --work <id> --token <token> --result '{"response":"..."}'
 pnpm cli -- routine:upsert --feed inbox --group '{"id":"likely-archive","label":"Likely archive","summary":"Conservative low-attention cleanup.","proposedAction":{"label":"Archive all","instruction":"Reread each authoritative source and archive the listed threads.","externalMutation":true},"items":[...]}'

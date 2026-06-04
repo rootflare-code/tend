@@ -1,5 +1,60 @@
 # Feed Thread Runbook
 
+Operate Tend from the canonical checkout at `/Users/danshipper/CascadeProjects/attention`. The CLI
+and server share runtime state under `../.attention-workbench/data/` by default, including when a
+temporary worktree is used for validation.
+
+The live local app is owned by one launcher:
+
+```bash
+./bin/tend-live start
+./bin/tend-live health
+./bin/tend-live restart
+./bin/tend-live stop
+```
+
+It owns web port `4321`, API port `4333`, the live PID lock, and the live health check. Feed threads
+run `./bin/tend-live health` before operating through the API or CLI. They never start servers, kill
+ports, or choose worktrees themselves. For branch validation, use `./bin/tend-live validate`; it
+uses temporary runtime state plus ports `14321` and `14333`.
+
+Feed threads own their feed work end to end through the canonical API or CLI. When a feed pass
+reveals a cross-app UX or code problem, record it without editing Tend product code from the feed
+lane:
+
+```bash
+pnpm cli -- feedback:record \
+  --feed <feed-id> \
+  --title "<short pain point>" \
+  --detail "<what happened, expected behavior, and useful card or sweep context>" \
+  --source-thread <Codex-thread-id>
+```
+
+Then hand the same concise packet to the `Improve Tend workflow` thread. The improvement lane can
+review the durable inbox with `pnpm cli -- feedback:list` and close landed fixes with
+`pnpm cli -- feedback:resolve --feedback <id> --resolution "<what changed>"`.
+
+## Runtime Handoff
+
+When retiring an older checkout-local runtime, record the handoff immediately after the one-time
+copy:
+
+```bash
+pnpm cli -- runtime:mark-handoff --legacy-data <retired-checkout-data-dir>
+```
+
+If a feed lane was already mid-turn, inspect for late writes:
+
+```bash
+pnpm cli -- runtime:reconcile --legacy-data <retired-checkout-data-dir>
+pnpm cli -- runtime:reconcile --legacy-data <retired-checkout-data-dir> --apply-missing
+```
+
+The apply pass copies only missing immutable evidence artifacts such as raw snapshots, runs, and
+sweep batches. It reports cards, work items, policies, event ledgers, and conflicting mutable files
+without overwriting live state. Carry reviewed mutable changes such as a late policy revision
+forward through the canonical CLI.
+
 ## First Local Setup
 
 When Codex starts this app on a Mac, check for Monologue before asking the user to configure
@@ -10,7 +65,7 @@ pnpm cli -- setup:detect-monologue
 ```
 
 If Monologue is installed, the command reads its local recording shortcut and persists the
-browser-facing capability under ignored `data/integrations/dictation.json`. The dock then follows
+browser-facing capability under ignored `../.attention-workbench/data/integrations/dictation.json`. The dock then follows
 that shortcut automatically when it is a supported single modifier. If Monologue is absent or its
 custom shortcut is not yet supported, the command records that honestly and keeps the Inbox Sweep
 Right Option fallback.
@@ -43,6 +98,11 @@ pnpm cli -- action:verify --feed <feed-id> --work <work-id> --token <capability-
 
 Repeat claim until it returns the idle handshake. An active claimed item is replayed so restart
 recovery stays simple and visible.
+
+Before Codex claims a mistaken dictated note, correct it with `work:edit` or return its card to the
+sweep with `card:return-to-review`. Returning a queued card cancels its unstarted local work. A done
+card can be returned for another review pass, but this does not reverse an external action that
+already happened.
 
 ## End Of Sweep
 
@@ -113,9 +173,11 @@ pnpm cli -- sweep:rejudge \
 ```
 
 The ledger refuses to complete `sweep_rejudge` work until that feedback trace has a recorded
-rejudgment. It also refuses to complete `recollect_sources` work until a new sweep batch has been
-recorded for that claimed recollection work item. Referenced source runs must already exist in the
-same feed. Recollection batches must use source runs recorded for the same claimed work item.
+rejudgment. If a newer sweep batch supersedes a claimed trace, `sweep:rejudge` automatically marks
+the old item `stale` so the feed lane can keep draining. The ledger also refuses to complete
+`recollect_sources` work until a new sweep batch has been recorded for that claimed recollection
+work item. Referenced source runs must already exist in the same feed. Recollection batches must
+use source runs recorded for the same claimed work item.
 
 For an existing local JSON artifact, import it without passing private payload text through the
 shell:
@@ -126,10 +188,12 @@ pnpm cli -- source:import-json-file --feed <feed-id> --source <source-id> --path
 
 Use `source:import-file` for local text or JSONL artifacts.
 
-Commit a judged card with structured blocks:
+Commit a judged card with structured blocks through a file-backed payload. Do not interpolate
+structured card JSON into the shell: card prose can contain backticks, dollar signs, and other
+shell-significant text.
 
 ```bash
-pnpm cli -- card:upsert --feed <feed-id> --card '<json-card>'
+pnpm cli -- card:upsert --feed <feed-id> --card-file <local-json-file>
 ```
 
 During migration only, an explicitly selected provenance-bearing card from the old Attention

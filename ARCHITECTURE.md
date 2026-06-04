@@ -1,8 +1,8 @@
-# Attention Architecture
+# Tend Architecture
 
 ## Product Shape
 
-Attention is a Codex-native browser shell, not a traditional integration server. The app renders
+Tend is a Codex-native browser shell, not a traditional integration server. The app renders
 cards and records durable state. The Codex thread bound to each feed does the flexible work:
 collecting authorized sources, judging what deserves attention, composing cards, interpreting
 instructions, performing approved actions, and distilling learnings.
@@ -14,10 +14,12 @@ can automate collection and drain later without changing the product contract.
 
 ## Filesystem Model
 
-All runtime state is local and git-ignored under `data/`.
+All runtime state is local, git-ignored, and shared across checkouts under
+`../.attention-workbench/data/`. That keeps the canonical `main` checkout and a temporary
+validation worktree on one Tend state unless a test explicitly overrides `ATTENTION_DATA_DIR`.
 
 ```text
-data/
+../.attention-workbench/data/
   global-policy.md
   integrations/dictation.json
   prompts/

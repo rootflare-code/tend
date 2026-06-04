@@ -7,6 +7,7 @@
     "api": "bun server.ts",
     "dev": "vite --host 127.0.0.1",
     "start": "concurrently -k -n api,web -c brown,blue \"bun run api\" \"pnpm dev\"",
+    "live": "./bin/tend-live",
     "build": "tsc && vite build",
     "test": "bun test",
     "cli": "bun run cli.ts",

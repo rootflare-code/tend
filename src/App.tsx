@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Card, CardAction, CardBlock, FeedView, RevisionProposal, RoutineActionGroup, VoiceTarget, WorkspaceRevision, WorkspaceView } from "./types";
+import type { Card, CardAction, CardBlock, FeedView, RevisionProposal, RoutineActionGroup, VoiceTarget, WorkItem, WorkspaceRevision, WorkspaceView } from "./types";
 import { useActiveCard } from "./state/activeCard";
 import { usePushToTalk } from "./state/pushToTalk";
 import { preferredTarget, sameTarget } from "./state/voiceTarget";
@@ -64,6 +64,31 @@ function FormattedText({ text = "" }: { text?: string }) {
   );
 }
 
+function videoEmbedUrl(href: string): string | null {
+  try {
+    const url = new URL(href);
+    if (url.hostname === "www.loom.com" && url.pathname.startsWith("/share/")) {
+      const id = url.pathname.slice("/share/".length).split("/")[0];
+      return id && /^[a-zA-Z0-9_-]+$/.test(id) ? `https://www.loom.com/embed/${id}` : null;
+    }
+    if (url.hostname === "youtu.be") {
+      const id = url.pathname.slice(1);
+      return id && /^[a-zA-Z0-9_-]+$/.test(id) ? `https://www.youtube.com/embed/${id}` : null;
+    }
+    if ((url.hostname === "www.youtube.com" || url.hostname === "youtube.com") && url.pathname === "/watch") {
+      const id = url.searchParams.get("v");
+      return id && /^[a-zA-Z0-9_-]+$/.test(id) ? `https://www.youtube.com/embed/${id}` : null;
+    }
+    if (url.hostname === "drive.google.com") {
+      const match = url.pathname.match(/^\/file\/d\/([a-zA-Z0-9_-]+)(?:\/|$)/);
+      return match ? `https://drive.google.com/file/d/${match[1]}/preview` : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function visibleCards(feed: FeedView, tab: Tab): Card[] {
   const pass = feed.config.currentPass;
   if (tab === "review") {
@@ -85,6 +110,15 @@ function visibleRoutineActions(feed: FeedView, tab: Tab): RoutineActionGroup[] {
   return feed.routineActions.filter((group) => group.status === status);
 }
 
+function editableQueuedNote(feed: FeedView, card: Card): WorkItem | undefined {
+  return [...feed.work].reverse().find((work) =>
+    work.cardId === card.id &&
+    work.status === "queued" &&
+    (work.kind === "instruction" || work.kind === "scoped_instruction") &&
+    (!work.intent || work.intent === "voice_instruction")
+  );
+}
+
 function countFor(feed: FeedView, tab: Tab): number {
   const feedWork = tab === "queued" || tab === "working"
     ? feed.work.filter((work) => work.cardId === "__feed__" && work.status === tab).length
@@ -93,8 +127,12 @@ function countFor(feed: FeedView, tab: Tab): number {
 }
 
 function visibleCardActions(card: Card): CardAction[] {
-  if (card.actions?.length) return card.actions;
   const archive: CardAction = { id: "default-cleanup", label: "Archive", behavior: "default_cleanup", variant: "secondary", shortcut: "x" };
+  if (card.actions?.length) {
+    return card.actions.some((action) => action.behavior === "default_cleanup")
+      ? card.actions
+      : [archive, ...card.actions];
+  }
   if (!card.proposedAction || card.proposedAction.label === "Decide disposition") return [archive];
   if (card.proposedAction.label === "Archive" || card.proposedAction.label === "Archive this thread") {
     return [{ ...archive, variant: "primary" }];
@@ -134,6 +172,12 @@ function readableHistory(card: Card): Array<{ at: string; label: string; detail:
     }
     if (entry.type === "user.cancelled_queued_work") {
       return [{ at: entry.at, label: "You cancelled", detail: "The queued instruction." }];
+    }
+    if (entry.type === "user.edited_queued_instruction") {
+      return [{ at: entry.at, label: "You corrected", detail: entry.detail ?? "The queued note." }];
+    }
+    if (entry.type === "user.returned_to_review") {
+      return [{ at: entry.at, label: "Back for review", detail: "You moved this card back into the sweep." }];
     }
     if (entry.type === "codex.completed") {
       return [{ at: entry.at, label: "Codex did", detail: entry.detail ?? "Finished the requested work." }];
@@ -224,6 +268,26 @@ function Block({ feedId, cardId, block, onChanged }: { feedId: string; cardId: s
       </section>
     );
   }
+  if (block.type === "video" && block.video) {
+    const embedUrl = videoEmbedUrl(block.video.href);
+    return (
+      <section className="block block-video">
+        {block.label && <h3>{block.label}</h3>}
+        {embedUrl && (
+          <div className="video-frame">
+            <iframe
+              src={embedUrl}
+              title={block.video.title}
+              loading="lazy"
+              allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+              allowFullScreen
+            />
+          </div>
+        )}
+        <a className="video-link" href={block.video.href} target="_blank" rel="noreferrer">Open video: {block.video.title}</a>
+      </section>
+    );
+  }
   if (block.type === "evidence") {
     return (
       <section className="block block-evidence">
@@ -276,18 +340,58 @@ function Block({ feedId, cardId, block, onChanged }: { feedId: string; cardId: s
   return <section className={`block block-${block.type}`}>{block.label && <h3>{block.label}</h3>}<p><FormattedText text={block.text} /></p></section>;
 }
 
+function QueuedNoteEditor({ work, onChanged }: { work: WorkItem; onChanged: () => void }) {
+  const [value, setValue] = useState(work.instruction);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setValue(work.instruction);
+    setError("");
+  }, [work.id, work.instruction]);
+  const save = async () => {
+    if (!value.trim() || value.trim() === work.instruction) return;
+    setSaving(true);
+    setError("");
+    try {
+      await post(`/api/feeds/${work.feedId}/work/${work.id}/instruction`, { instruction: value });
+      onChanged();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <section className="queued-note" onClick={(event) => event.stopPropagation()}>
+      <div className="queued-note-head">
+        <span className="action-label">Your note to Codex</span>
+        <div>
+          <small>{saving ? "Saving…" : "Editable until Codex starts"}</small>
+          <button className="button text" disabled={saving || !value.trim() || value.trim() === work.instruction} onClick={() => void save()}>Save</button>
+        </div>
+      </div>
+      <textarea value={value} onChange={(event) => setValue(event.target.value)} onBlur={() => void save()} rows={Math.max(3, value.split("\n").length + 1)} />
+      {error && <small className="queued-note-error">{error}</small>}
+    </section>
+  );
+}
+
 function CardView({
   card,
   active,
+  queuedNote,
   onActivate,
   onChanged,
   onAction,
+  onReturnToReview,
 }: {
   card: Card;
   active: boolean;
+  queuedNote?: WorkItem;
   onActivate: () => void;
   onChanged: () => void;
   onAction: (action: CardAction) => void;
+  onReturnToReview: () => void;
 }) {
   const actions = visibleCardActions(card);
   const nextThing = card.proposedAction?.label === "Decide disposition"
@@ -307,6 +411,7 @@ function CardView({
       <div className="blocks">
         {card.blocks.map((block) => <Block key={block.id} feedId={card.feedId} cardId={card.id} block={block} onChanged={onChanged} />)}
       </div>
+      {queuedNote && <QueuedNoteEditor work={queuedNote} onChanged={onChanged} />}
       <CardHistory card={card} />
       {card.status === "approved_blocked" && (
         <footer className="card-action">
@@ -315,6 +420,7 @@ function CardView({
             <b>Waiting for Codex to retry</b>
             {card.sourceMailbox && <small className="reply-mailbox">Reply from {card.sourceMailbox}</small>}
           </div>
+          <button className="button ghost" onClick={(event) => { event.stopPropagation(); onReturnToReview(); }}>Move back to review</button>
         </footer>
       )}
       {actions.length > 0 && (card.status === "to_review_new" || card.status === "to_review_updated") && (
@@ -336,6 +442,17 @@ function CardView({
               </button>
             ))}
           </div>
+        </footer>
+      )}
+      {(card.status === "queued" || card.status === "done") && (
+        <footer className="card-action card-return">
+          <div>
+            <span className="action-label">{card.status === "queued" ? "Queued for Codex" : "Done"}</span>
+            <b>{card.status === "queued" ? "Need to change something?" : "Want another look?"}</b>
+          </div>
+          <button className="button ghost" onClick={(event) => { event.stopPropagation(); onReturnToReview(); }}>
+            {card.status === "queued" ? "Move back to review" : "Review again"}
+          </button>
         </footer>
       )}
     </article>
@@ -566,18 +683,33 @@ function RevisionProposals({ proposals, onApply, onReject, onReviewLearning }: {
       {proposals.map((proposal) => (
         <article className="revision-proposal" key={proposal.id}>
           <div className="panel-kicker">{proposal.label}</div>
-          <h2>Proposed revision</h2>
-          <p>{proposal.instruction}</p>
-          <div className="proposal-diff">
-            <div><span>Before</span><pre>{proposal.previous}</pre></div>
-            <div><span>After</span><pre>{proposal.next}</pre></div>
-          </div>
-          <div className="proposal-actions">
-            {proposal.source === "compound"
-              ? <button className="button primary" onClick={onReviewLearning}>Review compounded learnings</button>
-              : <button className="button primary" onClick={() => onApply(proposal)}>Apply revision</button>}
-            <button className="button" onClick={() => onReject(proposal)}>Reject</button>
-          </div>
+          {proposal.source === "compound" ? (
+            <>
+              <h2>Suggested feed-rule update</h2>
+              <p>Codex noticed a reusable pattern in this sweep and drafted an update to this feed's rules. Nothing changes until you review and apply it.</p>
+              <div className="proposal-summary">
+                <span>Why this is suggested</span>
+                <p>{proposal.instruction}</p>
+              </div>
+              <div className="proposal-actions">
+                <button className="button primary" onClick={onReviewLearning}>Review proposed feed rules</button>
+                <button className="button" onClick={() => onReject(proposal)}>Discard</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <h2>Proposed revision</h2>
+              <p>{proposal.instruction}</p>
+              <div className="proposal-diff">
+                <div><span>Before</span><pre>{proposal.previous}</pre></div>
+                <div><span>After</span><pre>{proposal.next}</pre></div>
+              </div>
+              <div className="proposal-actions">
+                <button className="button primary" onClick={() => onApply(proposal)}>Apply revision</button>
+                <button className="button" onClick={() => onReject(proposal)}>Reject</button>
+              </div>
+            </>
+          )}
         </article>
       ))}
     </section>
@@ -592,9 +724,9 @@ function LearningReview({ feed, proposals, onBack, onApply, onReject }: { feed: 
     <main className="learning-page">
       <button className="workspace-back" onClick={onBack}>← Back to feed</button>
       <div className="learning-empty">
-        <div className="panel-kicker">Learning pass</div>
-        <h1>No learning proposal is waiting.</h1>
-        <p>When you finish a sweep, Codex can ask whether you want to compound what it learned. If you say yes, the editable proposal will appear here before anything changes.</p>
+        <div className="panel-kicker">Feed-rule review</div>
+        <h1>No feed-rule update is waiting.</h1>
+        <p>After a sweep, Codex can draft a reusable update to this feed's rules. The editable draft appears here before anything changes.</p>
       </div>
     </main>
   );
@@ -602,20 +734,20 @@ function LearningReview({ feed, proposals, onBack, onApply, onReject }: { feed: 
     <main className="learning-page">
       <button className="workspace-back" onClick={onBack}>← Back to feed</button>
       <div className="learning-title">
-        <div className="panel-kicker">Learning pass · {feed.config.name}</div>
-        <h1>Review what Codex learned.</h1>
-        <p>Keep this compact. Edit the proposed feed policy directly, then apply it only when it captures the judgment you want to preserve.</p>
+        <div className="panel-kicker">Proposed feed-rule update · {feed.config.name}</div>
+        <h1>Review the updated rules for this feed.</h1>
+        <p>Codex drafted these rules from your sweep feedback. Edit them directly, then apply only when they capture the judgment you want Tend to reuse.</p>
       </div>
       <section className="learning-review">
         <details>
-          <summary>Current feed policy</summary>
+          <summary>Show current rules for comparison</summary>
           <pre>{proposal.previous}</pre>
         </details>
-        <label htmlFor={`learning-${proposal.id}`}>Proposed feed policy</label>
-        <textarea id={`learning-${proposal.id}`} value={value} onChange={(event) => setValue(event.target.value)} rows={Math.max(14, Math.min(30, value.split("\n").length + 3))} />
+        <label htmlFor={`learning-${proposal.id}`}>Updated feed rules</label>
+        <textarea id={`learning-${proposal.id}`} value={value} onChange={(event) => setValue(event.target.value)} rows={Math.max(20, Math.min(42, value.split("\n").length + 3))} />
         <div className="learning-actions">
-          <button className="button primary" disabled={!value.trim()} onClick={() => onApply(proposal, value)}>Apply learning</button>
-          <button className="button ghost" onClick={() => onReject(proposal)}>Reject</button>
+          <button className="button primary" disabled={!value.trim()} onClick={() => onApply(proposal, value)}>Apply updated feed rules</button>
+          <button className="button ghost" onClick={() => onReject(proposal)}>Discard update</button>
         </div>
       </section>
     </main>
@@ -886,7 +1018,7 @@ export default function App() {
       if (content.trimEnd() !== proposal.next.trimEnd()) await post(`/api/revision-proposals/${proposal.id}`, { content });
       const revision = await post<WorkspaceRevision>(`/api/revision-proposals/${proposal.id}/apply`);
       setUndoRevision(revision.id);
-      showToast("Learning applied", 8_000);
+      showToast("Feed rules updated", 8_000);
       closeWorkspace();
       await refresh();
     } catch (error) {
@@ -894,7 +1026,7 @@ export default function App() {
     }
   })();
   const rejectLearningProposal = (proposal: RevisionProposal) => void (async () => {
-    await withRefresh(() => post(`/api/revision-proposals/${proposal.id}/reject`), "Learning proposal rejected");
+    await withRefresh(() => post(`/api/revision-proposals/${proposal.id}/reject`), "Feed-rule update discarded");
     closeWorkspace();
   })();
   useEffect(() => {
@@ -958,6 +1090,10 @@ export default function App() {
       }
     })();
   };
+  const returnToReview = (card: Card) => void withRefresh(
+    () => post(`/api/feeds/${card.feedId}/cards/${card.id}/return-to-review`),
+    "Moved back to review",
+  );
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
@@ -1030,7 +1166,7 @@ export default function App() {
         {cards.map((card, index) => (
           <Fragment key={card.id}>
             {tab === "review" && index === updated.length && fresh.length > 0 && <div className="section-label" key={`${card.id}-label`}>New <span>{fresh.length}</span></div>}
-            <CardView key={card.id} card={card} active={card.id === activeCard?.id} onActivate={() => setActiveCardId(card.id)} onChanged={() => void refresh()} onAction={(action) => runCardAction(card, action)} />
+            <CardView key={card.id} card={card} queuedNote={editableQueuedNote(feed, card)} active={card.id === activeCard?.id} onActivate={() => setActiveCardId(card.id)} onChanged={() => void refresh()} onAction={(action) => runCardAction(card, action)} onReturnToReview={() => returnToReview(card)} />
           </Fragment>
         ))}
         {feedWork.map((work) => (
