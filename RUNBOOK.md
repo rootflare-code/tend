@@ -53,7 +53,9 @@ pnpm cli -- runtime:reconcile --legacy-data <retired-checkout-data-dir> --apply-
 The apply pass copies only missing immutable evidence artifacts such as raw snapshots, runs, and
 sweep batches. It reports cards, work items, policies, event ledgers, and conflicting mutable files
 without overwriting live state. Carry reviewed mutable changes such as a late policy revision
-forward through the canonical CLI.
+forward through the canonical CLI. The handoff command marks the retired store with its live
+replacement and freezes the old tree read-only. If a retired checkout is accidentally restarted, it
+must not accept another approval, note, or card write.
 
 ## First Local Setup
 
@@ -194,6 +196,25 @@ shell-significant text.
 
 ```bash
 pnpm cli -- card:upsert --feed <feed-id> --card-file <local-json-file>
+```
+
+Card block payloads are validated before Tend writes them. Use `text` for `memo` and `receipt`
+blocks, `items` for `evidence`, `options`, and `checklist`, and Markdown link syntax inside receipt
+text. For comparative cohort metrics, prefer one compact two-series `chart` block:
+
+```json
+{
+  "id": "d1-retention",
+  "type": "chart",
+  "label": "D1 retention",
+  "chart": {
+    "unit": "%",
+    "max": 100,
+    "series": [{ "label": "Came back" }, { "label": "Worked again" }],
+    "rows": [{ "label": "Jun 1", "values": [23, 13] }],
+    "note": "Worked again is the healthier KPI."
+  }
+}
 ```
 
 During migration only, an explicitly selected provenance-bearing card from the old Attention

@@ -23,6 +23,7 @@ export type BlockType =
   | "email_thread"
   | "profile"
   | "video"
+  | "chart"
   | "receipt";
 
 export interface SourceRecipe {
@@ -85,6 +86,13 @@ export interface CardBlock {
   video?: {
     title: string;
     href: string;
+  };
+  chart?: {
+    unit?: string;
+    max: number;
+    series: [{ label: string }, { label: string }];
+    rows: Array<{ label: string; values: [number, number]; detail?: string }>;
+    note?: string;
   };
 }
 

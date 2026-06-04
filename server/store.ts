@@ -36,6 +36,7 @@ import {
 } from "./templates";
 import { isoNow, makeId, readJson, writeJson, writeText } from "./util";
 import { defaultDictationCapability } from "./monologue";
+import { assertRuntimeWritable } from "./runtime";
 
 export const GLOBAL_PROMPT_NAMES = ["judge.md", "compose-card.md", "execute-work.md", "distill-policy.md", "compound.md"] as const;
 export const FEED_PROMPT_NAMES = ["judge.md", "compose-card.md"] as const;
@@ -58,6 +59,7 @@ export class AttentionStore {
   }
 
   async init(): Promise<void> {
+    await assertRuntimeWritable(this.dataDir);
     await mkdir(this.dataDir, { recursive: true });
     await this.ensureText("global-policy.md", GLOBAL_POLICY);
     await this.ensureText("prompts/judge.md", BASE_JUDGE_PROMPT);
@@ -451,6 +453,7 @@ export class AttentionStore {
   }
 
   private async withFilesystemLock<T>(callback: () => Promise<T>): Promise<T> {
+    await assertRuntimeWritable(this.dataDir);
     const lockPath = this.path(".mutation-lock");
     for (let attempt = 0; attempt < 400; attempt += 1) {
       try {

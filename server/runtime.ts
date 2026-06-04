@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { readJson, writeJson } from "./util";
 
 const HANDOFF_FILENAME = "runtime-handoff.json";
+const RETIRED_FILENAME = ".tend-retired.json";
 
 export interface RuntimeDriftEntry {
   path: string;
@@ -27,6 +28,11 @@ export interface RuntimeHandoffMarker {
   legacyDataDirs: string[];
 }
 
+export interface RetiredRuntimeMarker {
+  retiredAt: string;
+  liveDataDir: string;
+}
+
 export function resolveRuntimeRoot(appRoot: string): string {
   return process.env.ATTENTION_RUNTIME_DIR ?? path.resolve(appRoot, "..", ".attention-workbench");
 }
@@ -40,18 +46,49 @@ export function resolveArtifactsDir(appRoot: string): string {
 }
 
 export async function writeRuntimeHandoffMarker(runtimeRoot: string, liveDataDir: string, legacyDataDir: string): Promise<RuntimeHandoffMarker> {
-  const marker: RuntimeHandoffMarker = {
-    createdAt: new Date().toISOString(),
-    liveDataDir: path.resolve(liveDataDir),
-    legacyDataDirs: [path.resolve(legacyDataDir)],
-  };
+  const live = path.resolve(liveDataDir);
+  const legacy = path.resolve(legacyDataDir);
+  if (live === legacy) throw new Error("Live and legacy runtime directories must be different.");
+  const existing = await readRuntimeHandoffMarker(runtimeRoot);
+  if (existing && path.resolve(existing.liveDataDir) !== live) throw new Error("Runtime handoff marker points to a different live data directory.");
+  const marker: RuntimeHandoffMarker = existing
+    ? { ...existing, legacyDataDirs: [...new Set([...existing.legacyDataDirs, legacy])] }
+    : { createdAt: new Date().toISOString(), liveDataDir: live, legacyDataDirs: [legacy] };
   await writeJson(path.join(runtimeRoot, HANDOFF_FILENAME), marker);
+  await freezeRetiredRuntimeDataDir(legacy, live, marker.createdAt);
   return marker;
 }
 
 export async function readRuntimeHandoffMarker(runtimeRoot: string): Promise<RuntimeHandoffMarker | null> {
   const filename = path.join(runtimeRoot, HANDOFF_FILENAME);
   return existsSync(filename) ? readJson<RuntimeHandoffMarker>(filename) : null;
+}
+
+export async function readRetiredRuntimeMarker(dataDir: string): Promise<RetiredRuntimeMarker | null> {
+  const filename = path.join(dataDir, RETIRED_FILENAME);
+  return existsSync(filename) ? readJson<RetiredRuntimeMarker>(filename) : null;
+}
+
+export async function assertRuntimeWritable(dataDir: string): Promise<void> {
+  const marker = await readRetiredRuntimeMarker(dataDir);
+  if (marker) throw new Error(`This Tend runtime was retired at ${marker.retiredAt}. Use the live runtime at ${marker.liveDataDir}.`);
+}
+
+export async function freezeRetiredRuntimeDataDir(legacyDataDir: string, liveDataDir: string, retiredAt = new Date().toISOString()): Promise<RetiredRuntimeMarker> {
+  const legacy = path.resolve(legacyDataDir);
+  const live = path.resolve(liveDataDir);
+  if (live === legacy) throw new Error("Live and legacy runtime directories must be different.");
+  if (!existsSync(legacy)) throw new Error(`Runtime directory not found: ${legacy}`);
+  const existing = await readRetiredRuntimeMarker(legacy);
+  if (existing && path.resolve(existing.liveDataDir) !== live) throw new Error("Retired runtime marker points to a different live data directory.");
+  const marker = existing ?? { retiredAt, liveDataDir: live };
+  if (!existing) await writeJson(path.join(legacy, RETIRED_FILENAME), marker);
+  await setRuntimeTreeWritable(legacy, false);
+  return marker;
+}
+
+export async function unfreezeRetiredRuntimeDataDir(dataDir: string): Promise<void> {
+  await setRuntimeTreeWritable(path.resolve(dataDir), true);
 }
 
 export async function inspectRuntimeDrift(liveDataDir: string, legacyDataDir: string, since?: string): Promise<RuntimeDriftReport> {
@@ -109,11 +146,22 @@ async function walkFiles(root: string, relative = ""): Promise<string[]> {
   const files: string[] = [];
   for (const entry of await readdir(path.join(root, relative), { withFileTypes: true })) {
     const child = path.join(relative, entry.name);
-    if (entry.name === ".mutation-lock" || entry.name.endsWith(".tmp")) continue;
+    if (entry.name === ".mutation-lock" || entry.name === RETIRED_FILENAME || entry.name.endsWith(".tmp")) continue;
     if (entry.isDirectory()) files.push(...await walkFiles(root, child));
     else if (entry.isFile()) files.push(child);
   }
   return files.sort();
+}
+
+async function setRuntimeTreeWritable(root: string, writable: boolean): Promise<void> {
+  if (!existsSync(root)) throw new Error(`Runtime directory not found: ${root}`);
+  if (writable) await chmod(root, 0o755);
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const child = path.join(root, entry.name);
+    if (entry.isDirectory()) await setRuntimeTreeWritable(child, writable);
+    else if (entry.isFile()) await chmod(child, writable ? 0o644 : 0o444);
+  }
+  if (!writable) await chmod(root, 0o555);
 }
 
 async function fileDigest(filename: string): Promise<string> {

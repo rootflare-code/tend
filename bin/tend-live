@@ -122,6 +122,7 @@ start_live() {
 
 stop_live() {
   local pid="$(read_pid)"
+  local port
   [[ -n "$pid" ]] || pid="$(service_pid)"
   if [[ -z "$pid" ]] && ! service_exists; then
     echo "Tend is not running under tend-live."
@@ -130,7 +131,18 @@ stop_live() {
   launchctl remove "$SERVICE_LABEL" >/dev/null 2>&1 || true
   [[ -n "$pid" ]] && terminate_tree "$pid"
   rm -f "$PID_FILE"
+  for _ in {1..40}; do
+    if [[ -z "$(listener_pid "$WEB_PORT")" ]] && [[ -z "$(listener_pid "$API_PORT")" ]]; then
+      break
+    fi
+    sleep 0.25
+  done
   echo "Stopped Tend pid $pid."
+}
+
+restart_live() {
+  stop_live
+  start_live
 }
 
 status_live() {
@@ -169,8 +181,7 @@ case "${1:-status}" in
     with_lock stop_live
     ;;
   restart)
-    with_lock stop_live
-    with_lock start_live
+    with_lock restart_live
     ;;
   status|health)
     status_live

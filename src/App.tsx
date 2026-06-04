@@ -288,6 +288,31 @@ function Block({ feedId, cardId, block, onChanged }: { feedId: string; cardId: s
       </section>
     );
   }
+  if (block.type === "chart" && block.chart) {
+    const unit = block.chart.unit ?? "";
+    return (
+      <section className="block block-chart">
+        {block.label && <h3>{block.label}</h3>}
+        <div className="chart-legend">
+          {block.chart.series.map((series, index) => <span key={series.label}><i className={`chart-swatch chart-series-${index + 1}`} />{series.label}</span>)}
+        </div>
+        <div className="chart-rows">
+          {block.chart.rows.map((row) => (
+            <div className="chart-row" key={row.label}>
+              <div className="chart-row-label"><b>{row.label}</b>{row.detail && <span>{row.detail}</span>}</div>
+              {row.values.map((value, index) => (
+                <div className="chart-metric" key={`${row.label}-${index}`} aria-label={`${row.label}: ${block.chart?.series[index].label} ${value}${unit}`}>
+                  <span className="chart-value">{value}{unit}</span>
+                  <span className="chart-track"><i className={`chart-bar chart-series-${index + 1}`} style={{ width: `${value / block.chart!.max * 100}%` }} /></span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        {block.chart.note && <p className="chart-note">{block.chart.note}</p>}
+      </section>
+    );
+  }
   if (block.type === "evidence") {
     return (
       <section className="block block-evidence">

@@ -76,6 +76,22 @@ h2 { margin: 0; font: 500 26px/1.12 var(--serif); letter-spacing: -.02em; }
 .video-frame { aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: #111; }
 .video-frame iframe { display: block; width: 100%; height: 100%; border: 0; }
 .video-link { font-size: 13px; font-weight: 600; }
+.block-chart { padding: 13px 14px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-warm); }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 6px 15px; margin-bottom: 10px; color: var(--ink-3); font-size: 12px; }
+.chart-legend span { display: flex; align-items: center; gap: 5px; }
+.chart-swatch { width: 8px; height: 8px; border-radius: 2px; }
+.chart-rows { display: grid; gap: 10px; }
+.chart-row { display: grid; grid-template-columns: minmax(74px, 1fr) minmax(130px, 2fr) minmax(130px, 2fr); align-items: center; gap: 9px; }
+.chart-row-label { display: grid; gap: 1px; min-width: 0; }
+.chart-row-label b { color: var(--ink-2); font-size: 12px; }
+.chart-row-label span { color: var(--ink-4); font-size: 11px; }
+.chart-metric { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 6px; }
+.chart-value { color: var(--ink); font: 700 12px/1 var(--mono); text-align: right; }
+.chart-track { display: block; height: 8px; overflow: hidden; border-radius: 99px; background: #e8e6df; }
+.chart-bar { display: block; min-width: 2px; height: 100%; border-radius: inherit; }
+.chart-series-1 { background: var(--blue); }
+.chart-series-2 { background: var(--sage); }
+.chart-note { margin-top: 10px !important; color: var(--ink-3); font-size: 12px; }
 .block-memo { padding: 15px 16px; background: #f5f3ec; border-left: 3px solid #c9c3b0; }
 .block-evidence ul, .block-checklist ul { display: grid; gap: 4px; margin: 0; padding-left: 19px; }
 .block-evidence li::marker { color: var(--sage); }
@@ -249,6 +265,8 @@ pre { overflow: auto; padding: 12px; background: #f4f2eb; color: var(--ink-2); w
   .tabs { gap: 19px; padding: 0 14px; }
   .attention-card { padding: 22px 17px 0; }
   .why, .blocks { margin-left: 0; }
+  .chart-row { grid-template-columns: minmax(70px, .8fr) minmax(105px, 1fr) minmax(105px, 1fr); gap: 6px; }
+  .chart-metric { grid-template-columns: 34px minmax(0, 1fr); gap: 4px; }
   .card-history { margin: 0 -17px; padding: 13px 17px; }
   .card-history li { grid-template-columns: 1fr; gap: 1px; }
   .queued-note { margin: 15px -17px 0; padding: 13px 17px; }

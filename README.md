@@ -72,7 +72,8 @@ During a checkout migration, record the retired data directory with
 `pnpm cli -- runtime:mark-handoff --legacy-data <path>`. A later
 `pnpm cli -- runtime:reconcile --legacy-data <path> --apply-missing` copies only late immutable
 evidence files and reports cards, work items, policies, event ledgers, and mutable conflicts for
-review instead of overwriting shared state.
+review instead of overwriting shared state. The handoff command also marks the old runtime with its
+canonical replacement and freezes its tree read-only so a retired checkout cannot accept new work.
 
 ```text
 ../.attention-workbench/data/
@@ -118,6 +119,8 @@ shared prompt layers directly.
 Cards may expose the concrete next moves that fit the source item instead of a generic approval
 pair. For example, a reply card can show `Archive` and `Send reply`, while an ambiguous invitation
 can show `Draft a yes`, `Draft a pass`, and `Research`. Preparation actions only queue Codex work.
+For compact comparative metrics, cards can use a validated two-series `chart` block with `max`,
+`series`, and labeled `rows`; use it when a graph scans faster than a paragraph or evidence list.
 Queued cards keep their dictated note editable until Codex claims the work, and every queued card
 has a durable `Move back to review` control after the short-lived toast disappears.
 An external mutation still requires an exact visible approval bound to the selected action and

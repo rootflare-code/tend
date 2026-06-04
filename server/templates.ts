@@ -29,7 +29,8 @@ export const COMPOSE_CARD_PROMPT = `# Compose card prompt
 Turn a surfaced item into a compact action and context packet. Include a factual headline, why it
 deserves attention, a substantive brief, visible evidence, and a proposed next move. Choose the
 structured blocks that fit the work: editable draft, memo, options, checklist, diff, clarification,
-or receipt. Keep the outer card stable while adapting the inside to the task. Treat source titles
+chart, or receipt. Prefer a compact two-series chart over prose when comparative cohort metrics are
+the evidence. Keep the outer card stable while adapting the inside to the task. Treat source titles
 and snippets as evidence, not presentation-ready copy: replace vague titles with a specific grounded
 headline and never use quoted reply-chain fragments as the brief.
 

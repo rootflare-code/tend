@@ -5,8 +5,8 @@ import path from "node:path";
 import { AttentionDomain } from "../server/domain";
 import { formatWorkClaimOutput, formatWorkListOutput } from "../server/operator";
 import { AttentionStore } from "../server/store";
-import { inspectRuntimeDrift, reconcileMissingRuntimeFiles } from "../server/runtime";
-import type { WorkItem } from "../src/types";
+import { assertRuntimeWritable, inspectRuntimeDrift, readRetiredRuntimeMarker, reconcileMissingRuntimeFiles, unfreezeRetiredRuntimeDataDir, writeRuntimeHandoffMarker } from "../server/runtime";
+import type { CardBlock, WorkItem } from "../src/types";
 import { closestTarget, preferredTarget } from "../src/state/voiceTarget";
 
 const roots: string[] = [];
@@ -140,6 +140,25 @@ describe("filesystem workspace", () => {
     expect((await inspectRuntimeDrift(live, legacy)).entries.map((entry) => entry.path)).toEqual(["feeds/hiring/cards/late.json", "feeds/hiring/policy.md"]);
   });
 
+  test("freezes retired runtime directories during canonical handoff", async () => {
+    const runtime = await mkdtemp(path.join(os.tmpdir(), "attention-runtime-"));
+    const live = await mkdtemp(path.join(os.tmpdir(), "attention-live-"));
+    const legacy = await mkdtemp(path.join(os.tmpdir(), "attention-legacy-"));
+    roots.push(runtime, live, legacy);
+    await mkdir(path.join(legacy, "feeds", "inbox"), { recursive: true });
+    await writeFile(path.join(legacy, "feeds", "inbox", "policy.md"), "legacy policy\n");
+    try {
+      const handoff = await writeRuntimeHandoffMarker(runtime, live, legacy);
+      expect(handoff.legacyDataDirs).toEqual([legacy]);
+      expect((await readRetiredRuntimeMarker(legacy))?.liveDataDir).toBe(live);
+      await expect(assertRuntimeWritable(legacy)).rejects.toThrow(`Use the live runtime at ${live}`);
+      await expect(writeFile(path.join(legacy, "feeds", "inbox", "late-write.json"), "{}\n")).rejects.toThrow();
+      expect((await inspectRuntimeDrift(live, legacy)).entries.map((entry) => entry.path)).toEqual(["feeds/inbox/policy.md"]);
+    } finally {
+      await unfreezeRetiredRuntimeDataDir(legacy);
+    }
+  });
+
   test("normalizes escaped newlines and removes a source recipe without deleting evidence files", async () => {
     const { root, domain, store } = await setup();
     const source = await domain.addSourceFromBrief("company-attention", "Local pulse artifact\\nRead the current ignored JSON batch.");
@@ -172,6 +191,72 @@ describe("filesystem workspace", () => {
     const card = await store.readCard("company-attention", "company-real-signal");
     expect(card.blocks[0].type).toBe("memo");
     expect(card.status).toBe("to_review_new");
+  });
+
+  test("rejects malformed card blocks with actionable replay guidance", async () => {
+    const { domain } = await setup();
+    const card = {
+      id: "company-malformed-replay",
+      title: "Malformed replay",
+      why: "A replay should fail before it can render blank bars.",
+    };
+    await expect(domain.upsertCard("company-attention", {
+      ...card,
+      blocks: [{ id: "brief", type: "memo", title: "Ignored title", body: "Ignored body" }] as unknown as CardBlock[],
+    })).rejects.toThrow("Use `text`, not `title` or `body`");
+    await expect(domain.upsertCard("company-attention", {
+      ...card,
+      blocks: [{ id: "evidence", type: "evidence", title: "Ignored evidence" }] as unknown as CardBlock[],
+    })).rejects.toThrow("needs a non-empty `items` array");
+    await expect(domain.upsertCard("company-attention", {
+      ...card,
+      blocks: [{ id: "source", type: "receipt", url: "https://example.com/source" }] as unknown as CardBlock[],
+    })).rejects.toThrow("Markdown link syntax");
+    await expect(domain.upsertCard("company-attention", {
+      ...card,
+      blocks: [{ id: "retention", type: "chart", chart: { max: 100, series: [{ label: "Came back" }], rows: [] } }] as unknown as CardBlock[],
+    })).rejects.toThrow("exactly two `chart.series`");
+  });
+
+  test("accepts a compact two-series evidence chart", async () => {
+    const { store, domain } = await setup();
+    await domain.upsertCard("company-attention", {
+      id: "company-retention-chart",
+      title: "Retention chart",
+      why: "Comparative cohort metrics should scan quickly.",
+      blocks: [{
+        id: "retention",
+        type: "chart",
+        label: "D1 retention",
+        chart: {
+          unit: "%",
+          max: 100,
+          series: [{ label: "Came back" }, { label: "Worked again" }],
+          rows: [{ label: "Jun 1", values: [23, 13] }],
+          note: "Worked again is the healthier KPI.",
+        },
+      }],
+    });
+    expect((await store.readCard("company-attention", "company-retention-chart")).blocks[0].chart?.rows[0].values).toEqual([23, 13]);
+  });
+
+  test("rejects malformed work-result blocks before replacing a valid card", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("company-attention", "thread-company");
+    await domain.upsertCard("company-attention", {
+      id: "company-agent-result",
+      title: "Agent result",
+      why: "Structured work result write-backs need the same guardrail.",
+      blocks: [{ id: "brief", type: "memo", text: "Still valid." }],
+    });
+    const work = await domain.queueInstruction("company-attention", "company-agent-result", "Refresh the card.");
+    expect((await domain.claimWork("company-attention", "thread-company"))?.id).toBe(work.id);
+    await expect(domain.completeWork("company-attention", work.id, work.capabilityToken, {
+      response: "Refreshed.",
+      blocks: [{ id: "brief", type: "memo", body: "Would render blank." }] as unknown as CardBlock[],
+    })).rejects.toThrow("Use `text`, not `title` or `body`");
+    expect((await store.readCard("company-attention", "company-agent-result")).blocks[0].text).toBe("Still valid.");
+    expect((await store.readWork("company-attention", work.id)).status).toBe("working");
   });
 
   test("queues a feed-level instruction when an empty feed has no active card", async () => {

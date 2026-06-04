@@ -170,6 +170,158 @@ function queuedWork(feedId: string, cardId: string, instruction: string, extra: 
   };
 }
 
+const CARD_BLOCK_TYPES = new Set<CardBlock["type"]>([
+  "rich_text",
+  "evidence",
+  "editable_text",
+  "memo",
+  "options",
+  "checklist",
+  "diff",
+  "clarification",
+  "email_thread",
+  "profile",
+  "video",
+  "chart",
+  "receipt",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === "string" && Boolean(value.trim());
+}
+
+function blockDescription(block: Record<string, unknown>, index: number): string {
+  const type = typeof block.type === "string" ? block.type : "unknown type";
+  const id = typeof block.id === "string" && block.id.trim() ? ` "${block.id}"` : "";
+  return `Card block ${index + 1} (${type}${id})`;
+}
+
+function validateTextBlock(block: Record<string, unknown>, index: number, hint?: string): void {
+  if (hasText(block.text)) return;
+  throw new Error(`${blockDescription(block, index)} needs a non-empty \`text\` string.${hint ? ` ${hint}` : ""}`);
+}
+
+function validateListBlock(block: Record<string, unknown>, index: number): void {
+  if (!Array.isArray(block.items) || !block.items.length) {
+    throw new Error(`${blockDescription(block, index)} needs a non-empty \`items\` array.`);
+  }
+  for (const [itemIndex, item] of block.items.entries()) {
+    if (hasText(item)) continue;
+    if (!isRecord(item) || !hasText(item.label)) {
+      throw new Error(`${blockDescription(block, index)} item ${itemIndex + 1} must be a non-empty string or an object with a non-empty \`label\`.`);
+    }
+    if (item.detail !== undefined && typeof item.detail !== "string") {
+      throw new Error(`${blockDescription(block, index)} item ${itemIndex + 1} has a non-string \`detail\`.`);
+    }
+    if (item.checked !== undefined && typeof item.checked !== "boolean") {
+      throw new Error(`${blockDescription(block, index)} item ${itemIndex + 1} has a non-boolean \`checked\`.`);
+    }
+  }
+}
+
+function validateCardBlocks(blocks: unknown): asserts blocks is CardBlock[] {
+  if (!Array.isArray(blocks)) throw new Error("Card blocks must be an array.");
+  const ids = new Set<string>();
+  for (const [index, block] of blocks.entries()) {
+    if (!isRecord(block)) throw new Error(`Card block ${index + 1} must be an object.`);
+    if (!hasText(block.id)) throw new Error(`${blockDescription(block, index)} needs a non-empty \`id\` string.`);
+    if (ids.has(block.id)) throw new Error(`${blockDescription(block, index)} repeats block id "${block.id}". Block ids must be unique within a card.`);
+    ids.add(block.id);
+    if (typeof block.type !== "string" || !CARD_BLOCK_TYPES.has(block.type as CardBlock["type"])) {
+      throw new Error(`${blockDescription(block, index)} has an unsupported \`type\`.`);
+    }
+    if (block.label !== undefined && typeof block.label !== "string") {
+      throw new Error(`${blockDescription(block, index)} has a non-string \`label\`.`);
+    }
+    switch (block.type) {
+      case "memo":
+        validateTextBlock(block, index, "Use `text`, not `title` or `body`.");
+        break;
+      case "receipt":
+        validateTextBlock(block, index, "Put source links in `text` using Markdown link syntax, not a loose `url` field.");
+        break;
+      case "rich_text":
+      case "clarification":
+      case "email_thread":
+        validateTextBlock(block, index);
+        break;
+      case "evidence":
+      case "options":
+      case "checklist":
+        validateListBlock(block, index);
+        break;
+      case "editable_text":
+        if (typeof block.value !== "string") throw new Error(`${blockDescription(block, index)} needs a string \`value\`.`);
+        break;
+      case "diff":
+        if (typeof block.before !== "string" || typeof block.after !== "string") {
+          throw new Error(`${blockDescription(block, index)} needs string \`before\` and \`after\` values.`);
+        }
+        break;
+      case "profile":
+        if (
+          !isRecord(block.profile) ||
+          !hasText(block.profile.name) ||
+          !hasText(block.profile.href) ||
+          !hasText(block.profile.imageUrl)
+        ) {
+          throw new Error(`${blockDescription(block, index)} needs \`profile.name\`, \`profile.href\`, and \`profile.imageUrl\` strings.`);
+        }
+        if (block.profile.links !== undefined) {
+          if (!Array.isArray(block.profile.links) || block.profile.links.some((link) => !isRecord(link) || !hasText(link.label) || !hasText(link.href))) {
+            throw new Error(`${blockDescription(block, index)} profile links need non-empty \`label\` and \`href\` strings.`);
+          }
+        }
+        break;
+      case "video":
+        if (!isRecord(block.video) || !hasText(block.video.title) || !hasText(block.video.href)) {
+          throw new Error(`${blockDescription(block, index)} needs \`video.title\` and \`video.href\` strings.`);
+        }
+        break;
+      case "chart":
+        if (!isRecord(block.chart) || typeof block.chart.max !== "number" || !Number.isFinite(block.chart.max) || block.chart.max <= 0) {
+          throw new Error(`${blockDescription(block, index)} needs a positive numeric \`chart.max\`.`);
+        }
+        const max = block.chart.max;
+        if (
+          !Array.isArray(block.chart.series) ||
+          block.chart.series.length !== 2 ||
+          block.chart.series.some((series) => !isRecord(series) || !hasText(series.label))
+        ) {
+          throw new Error(`${blockDescription(block, index)} needs exactly two \`chart.series\` entries with non-empty \`label\` strings.`);
+        }
+        if (!Array.isArray(block.chart.rows) || !block.chart.rows.length) {
+          throw new Error(`${blockDescription(block, index)} needs a non-empty \`chart.rows\` array.`);
+        }
+        for (const [rowIndex, row] of block.chart.rows.entries()) {
+          if (
+            !isRecord(row) ||
+            !hasText(row.label) ||
+            !Array.isArray(row.values) ||
+            row.values.length !== 2 ||
+            row.values.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max)
+          ) {
+            throw new Error(`${blockDescription(block, index)} chart row ${rowIndex + 1} needs a non-empty \`label\` and exactly two numeric \`values\` between 0 and \`chart.max\`.`);
+          }
+          if (row.detail !== undefined && typeof row.detail !== "string") {
+            throw new Error(`${blockDescription(block, index)} chart row ${rowIndex + 1} has a non-string \`detail\`.`);
+          }
+        }
+        if (block.chart.unit !== undefined && typeof block.chart.unit !== "string") {
+          throw new Error(`${blockDescription(block, index)} has a non-string \`chart.unit\`.`);
+        }
+        if (block.chart.note !== undefined && typeof block.chart.note !== "string") {
+          throw new Error(`${blockDescription(block, index)} has a non-string \`chart.note\`.`);
+        }
+        break;
+    }
+  }
+}
+
 export class AttentionDomain {
   constructor(readonly store: AttentionStore) {}
 
@@ -844,6 +996,7 @@ export class AttentionDomain {
   }
 
   async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; actions?: CardAction[]; done?: boolean }): Promise<WorkItem> {
+    if (result.blocks) validateCardBlocks(result.blocks);
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Work item is not currently claimed.");
@@ -1137,6 +1290,7 @@ export class AttentionDomain {
   }
 
   async upsertCard(feedId: string, input: Partial<Card> & Pick<Card, "id" | "title" | "why" | "blocks">): Promise<Card> {
+    validateCardBlocks(input.blocks);
     return this.store.serialize(async () => {
       const config = await this.store.readConfig(feedId);
       const now = isoNow();

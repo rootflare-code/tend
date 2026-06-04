@@ -17,6 +17,9 @@ can automate collection and drain later without changing the product contract.
 All runtime state is local, git-ignored, and shared across checkouts under
 `../.attention-workbench/data/`. That keeps the canonical `main` checkout and a temporary
 validation worktree on one Tend state unless a test explicitly overrides `ATTENTION_DATA_DIR`.
+When a checkout-local runtime is retired, its data directory receives a marker naming the canonical
+replacement and becomes read-only. Reconciliation can still inspect it and copy missing immutable
+evidence, but stale UIs and CLIs cannot keep accepting writes after cutover.
 
 ```text
 ../.attention-workbench/data/

@@ -19,7 +19,7 @@
 | Verify an approved external action or cleanup | Choose the exact visible mutation, cleanup, or routine group | `action:verify` rereads the selected card-action ID, current artifact, cleanup, or batch digest immediately before mutation and records verification durably; Inbox replies additionally require `--mailbox <authenticated-gmail-email>` to match the source message's received-at mailbox |
 | Collect evidence | Render the resulting cards | `source:record-run` or `source:import-json-file` writes immutable snapshots and checkpoints; `sweep:record-batch` records the judged batch separately |
 | Rejudge sweep feedback | Submit dock feedback to `This sweep` | `sweep:rejudge` writes an explicit kept order and removed-card set before recollection is offered |
-| Render a judged item | Review its structured blocks | `card:upsert --feed ... --card ...` |
+| Render a judged item | Review its validated structured blocks, including compact two-series charts for comparative metrics | `card:upsert --feed ... --card-file ...` |
 | Compound learning | Answer yes when the feed thread offers its end-of-sweep learning pass; review and edit the resulting full-screen policy proposal before applying it | An idle `work:list` or `work:claim` reminds Codex to offer the pass after meaningful sweep work; `learning:request --feed ...` queues one `compound_learnings` job; Codex reviews durable evidence and uses `revision:propose --source compound`; the browser applies only the user-reviewed Markdown |
 | Revert micro-learning | Review policy history | `policy:revert --feed ... --revision ...` |
 
