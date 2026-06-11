@@ -1127,6 +1127,35 @@ export class AttentionDomain {
     });
   }
 
+  async reconcileApprovedWork(feedId: string, workId: string, token: string, result: { response: string }): Promise<WorkItem> {
+    return this.store.serialize(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if (work.status !== "approved_blocked" || work.kind !== "execute_approved_action" || !work.approvalDigest) {
+        throw new Error("Only a blocked approved action can be reconciled.");
+      }
+      if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
+      if (work.verifiedApprovalDigest !== work.approvalDigest || !work.verifiedAt) {
+        throw new Error("Blocked approved action must have passed action:verify before it can be reconciled.");
+      }
+      if (!result.response?.trim()) throw new Error("A reconciliation response is required.");
+      const completedAt = isoNow();
+      const card = await this.store.readCard(feedId, work.cardId);
+      card.status = "done";
+      card.completedAt = completedAt;
+      card.readyForPass = (await this.store.readConfig(feedId)).currentPass + 1;
+      appendHistory(card, "codex.approved_action_reconciled", result.response.trim());
+      work.status = "completed";
+      work.completedAt = completedAt;
+      work.updatedAt = completedAt;
+      work.response = result.response.trim();
+      work.error = undefined;
+      await this.store.writeWork(work);
+      await this.store.writeCard(card);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.approved_action_reconciled", detail: { response: work.response } });
+      return work;
+    });
+  }
+
   async retryApprovedWork(feedId: string, workId: string): Promise<WorkItem> {
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);

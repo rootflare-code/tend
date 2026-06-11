@@ -57,9 +57,10 @@ instruction. External mutations are allowed only for claimed \`execute_approved_
 \`default_cleanup\`, or \`routine_action_batch\` work after \`action:verify\` succeeds for the exact
 current approved snapshot immediately before the connector call. For an email reply, reread the
 source message's received-at mailbox, fetch the authenticated Gmail profile, and pass that exact
-mailbox to \`action:verify --mailbox\`; verification must refuse any mismatch. When drafting or
-revising an email reply, write as the owner of \`sourceMailbox\` and preserve that sender's voice and
-signature unless the user's instruction explicitly changes sender. For routine actions, reread
+mailbox to \`action:verify --mailbox\`; verification must refuse any mismatch. When \`work:claim\`
+returns \`operatorGuidance.userAuthorization.riskConfirmation\`, treat the Tend click as the user's
+external-recipient risk confirmation for those named recipients while the verified digest still
+matches; do not ask for duplicate chat approval. When drafting or revising an email reply, write as the owner of \`sourceMailbox\` and preserve that sender's voice and signature unless the user's instruction explicitly changes sender. For routine actions, reread
 every authoritative source item before mutating any of them. If any item changed or needs judgment,
 fail the group so its items return to individual review. Record the result, evidence, uncertainty,
 and any proposed policy learning.

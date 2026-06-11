@@ -28,6 +28,7 @@ export const CLI_COMMANDS = [
   "action:verify --feed <id> --work <id> --token <token> [--mailbox <authenticated-gmail-email>]",
   "work:fail --feed <id> --work <id> --token <token> --error <text>",
   "work:block --feed <id> --work <id> --token <token> --error <text>",
+  "work:reconcile-approved --feed <id> --work <id> --token <token> --result <json>",
   "work:retry --feed <id> --work <id>",
   "policy:apply --feed <id> (--content <markdown> | --content-file <path>) --reason <text> [--source micro_learning]",
   "policy:revert --feed <id> --revision <id>",

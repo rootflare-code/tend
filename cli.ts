@@ -147,6 +147,9 @@ try {
   case "work:block":
     output = await domain.blockApprovedWork(required("feed"), required("work"), required("token"), required("error"));
     break;
+  case "work:reconcile-approved":
+    output = await domain.reconcileApprovedWork(required("feed"), required("work"), required("token"), json(required("result")));
+    break;
   case "work:retry":
     output = await domain.retryApprovedWork(required("feed"), required("work"));
     break;

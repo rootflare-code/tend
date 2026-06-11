@@ -59,6 +59,11 @@ export interface UserAuthorizationReceipt {
     text?: string;
     items?: CardBlock["items"];
   };
+  riskConfirmation?: {
+    kind: "external_recipient";
+    recipients: string[];
+    statement: string;
+  };
   invalidatesIf: string[];
 }
 
@@ -91,6 +96,31 @@ function cardReceipt(card: Card): NonNullable<UserAuthorizationReceipt["card"]> 
   };
 }
 
+function uniqueEmails(...values: Array<unknown>): string[] {
+  const emails = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    for (const match of value.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)) {
+      emails.add(match[0].toLowerCase());
+    }
+  }
+  return [...emails];
+}
+
+function riskConfirmation(card: Card, action: ProposedAction, artifact?: CardBlock): UserAuthorizationReceipt["riskConfirmation"] | undefined {
+  if (!action.externalMutation) return undefined;
+  const sourceMailbox = card.sourceMailbox?.trim().toLowerCase();
+  const recipients = uniqueEmails(action.label, action.instruction, artifact?.value, artifact?.text)
+    .filter((recipient) => recipient !== sourceMailbox);
+  if (!recipients.length) return undefined;
+  const verb = /\bforward/i.test(`${action.label} ${action.instruction}`) ? "forwarding" : "sending";
+  return {
+    kind: "external_recipient",
+    recipients,
+    statement: `The approved Tend action snapshot named external recipient(s) ${recipients.join(", ")}. The user click also confirmed the connector risk of ${verb} private inbound email to those recipient(s); no separate chat reconfirmation is required while action:verify still matches.`,
+  };
+}
+
 function buildAuthorizationReceipt(work: WorkItem, context: WorkClaimContext): UserAuthorizationReceipt | undefined {
   if (!work.approvalDigest) return undefined;
   const approvedAt = work.createdAt;
@@ -104,9 +134,10 @@ function buildAuthorizationReceipt(work: WorkItem, context: WorkClaimContext): U
     }
     if (work.approvalDigest !== actionDigest(context.card, work.cardActionId)) return undefined;
     const artifact = action.artifactBlockId ? context.card.blocks.find((block) => block.id === action.artifactBlockId) : undefined;
+    const risk = riskConfirmation(context.card, action, artifact);
     return {
       kind: "tend_action_click",
-      statement: `The user clicked "${action.label}" in Tend at ${approvedAt} and authorized this one external mutation for "${context.card.title}". This receipt is sufficient final approval; do not ask for a second chat confirmation.`,
+      statement: `The user clicked "${action.label}" in Tend at ${approvedAt} and authorized this one external mutation for "${context.card.title}".${risk ? ` ${risk.statement}` : ""} This receipt is sufficient final approval; do not ask for a second chat confirmation.`,
       noSecondChatConfirmationNeeded: true,
       actionLabel: action.label,
       approvedAt,
@@ -115,6 +146,7 @@ function buildAuthorizationReceipt(work: WorkItem, context: WorkClaimContext): U
       card: cardReceipt(context.card),
       ...(context.card.sourceMailbox ? { sourceMailbox: context.card.sourceMailbox } : {}),
       ...(artifact ? { exactApprovedArtifact: artifactReceipt(artifact) } : {}),
+      ...(risk ? { riskConfirmation: risk } : {}),
       invalidatesIf: APPROVAL_INVALIDATIONS,
     };
   }

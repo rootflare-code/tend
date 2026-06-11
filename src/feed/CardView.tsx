@@ -45,6 +45,9 @@ function readableHistory(card: Card): Array<{ at: string; label: string; detail:
     if (entry.type === "codex.approved_action_retry_queued") {
       return [{ at: entry.at, label: "Codex retrying", detail: "Your existing approval is still bound to the unchanged artifact." }];
     }
+    if (entry.type === "codex.approved_action_reconciled") {
+      return [{ at: entry.at, label: "Codex did", detail: entry.detail ?? "Recorded the approved action as completed after the connector succeeded." }];
+    }
     if (entry.type === "routine_action.completed") {
       return [{ at: entry.at, label: "Codex did", detail: "Completed the approved routine cleanup." }];
     }

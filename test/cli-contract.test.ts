@@ -13,6 +13,7 @@ describe("CLI contract", () => {
     expect(commandNames).toContain("work:claim");
     expect(commandNames).toContain("action:verify");
     expect(commandNames).toContain("work:complete");
+    expect(commandNames).toContain("work:reconcile-approved");
     expect(commandNames).toContain("source:record-run");
     expect(commandNames).toContain("card:upsert");
     expect(commandNames).toContain("learning:request");

@@ -10,7 +10,7 @@ Use this skill when a Codex Desktop thread is connected to a local Attention fee
 - Treat the feed binding as ownership. Do not drain another feed unless explicitly using cross-feed work.
 - List queued work before using Gmail, GitHub, Slack, browser, filesystem, or other local connectors.
 - Claim work before acting on a queued instruction.
-- For approved external mutations, call `attention cli action:verify` immediately before the connector mutation.
+- For approved external mutations, call `attention cli action:verify` immediately before the connector mutation. If `work:claim` includes `operatorGuidance.userAuthorization.riskConfirmation`, that in-app receipt is the user's risk confirmation for the named recipients while the verified digest still matches.
 - Complete, fail, block, retry, or cancel claimed work through `attention cli`.
 - Refresh sources only after the queue is drained, unless the claimed work explicitly asks for collection.
 
@@ -61,5 +61,5 @@ attention cli action:verify --feed <feed-id> --work <work-id> --token <token>
 attention cli work:complete --feed <feed-id> --work <work-id> --token <token> --result '{"response":"..."}'
 ```
 
-Use `work:fail`, `work:block`, `work:retry`, or `work:cancel` when completion is not appropriate.
+Use `work:fail`, `work:block`, `work:retry`, or `work:cancel` when completion is not appropriate. If an approved action was blocked but the exact connector mutation later succeeded, record that with `work:reconcile-approved --feed <feed-id> --work <work-id> --token <token> --result '{"response":"..."}'` instead of recreating the old card shape.
 Run `attention cli help` for the full command surface.

@@ -117,6 +117,46 @@ describe("feed thread operator handshake", () => {
     expect(output.operatorGuidance.userAuthorization.invalidatesIf).toContain("the approved artifact changes");
   });
 
+  test("includes external-recipient risk confirmation for approved forwards", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertCard("inbox", {
+      id: "wethos-forward",
+      title: "Forward Wethos to Sydney.",
+      why: "The visible action names the external recipient.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "forward-note", type: "editable_text", label: "Forward note", value: "fyi - can you take a look?", editable: true }],
+      actions: [
+        {
+          id: "forward-sydney",
+          label: "Forward to Sydney",
+          behavior: "approve_action",
+          instruction: "Forward the private inbound Wethos thread with this exact note to sydney@smoothmedia.co.",
+          artifactBlockId: "forward-note",
+          externalMutation: true,
+          mailboxPolicy: "reply_from_source",
+        },
+      ],
+    });
+
+    await domain.runCardAction("inbox", "wethos-forward", "forward-sydney");
+    const claimed = await domain.claimWork("inbox", "thread-inbox");
+    const card = await store.readCard("inbox", "wethos-forward");
+    const output = formatWorkClaimOutput("inbox", claimed, { card }) as any;
+
+    expect(output.operatorGuidance.userAuthorization).toMatchObject({
+      actionLabel: "Forward to Sydney",
+      noSecondChatConfirmationNeeded: true,
+      riskConfirmation: {
+        kind: "external_recipient",
+        recipients: ["sydney@smoothmedia.co"],
+      },
+    });
+    expect(output.operatorGuidance.userAuthorization.riskConfirmation.statement).toContain("private inbound email");
+    expect(output.operatorGuidance.userAuthorization.statement).toContain("sydney@smoothmedia.co");
+    expect(output.operatorGuidance.userAuthorization.statement).toContain("do not ask for a second chat confirmation");
+  });
+
   test("omits the click authorization receipt when the approval snapshot is stale", async () => {
     const { store, domain } = await setup();
     await domain.bindFeed("inbox", "thread-inbox");
@@ -881,6 +921,54 @@ describe("approval, learning, and heartbeat safety", () => {
     const claimed = await domain.claimWork("inbox", "thread-inbox");
     expect(claimed?.id).toBe(approved.id);
     expect((await domain.verifyApprovedAction("inbox", approved.id, claimed!.capabilityToken, "dan@every.to")).artifact?.value).toBe("Approved draft.");
+  });
+
+  test("reconciles a blocked approved action that later succeeded without requiring the old card shape", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertCard("inbox", {
+      id: "blocked-forward-later-succeeded",
+      title: "Forward this exact note.",
+      why: "The connector may need to reconcile after a separate risk boundary.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "draft", type: "editable_text", label: "Forward note", value: "Approved forward note.", editable: true }],
+      actions: [
+        { id: "forward", label: "Forward to Sydney", behavior: "approve_action", instruction: "Forward the exact note to sydney@smoothmedia.co.", artifactBlockId: "draft", externalMutation: true, mailboxPolicy: "reply_from_source" },
+      ],
+    });
+    const approved = await domain.runCardAction("inbox", "blocked-forward-later-succeeded", "forward");
+    await domain.claimWork("inbox", "thread-inbox");
+    await domain.verifyApprovedAction("inbox", approved.id, approved.capabilityToken, "dan@every.to");
+    await domain.blockApprovedWork("inbox", approved.id, approved.capabilityToken, "Connector required external-recipient confirmation.");
+    await domain.updateBlock("inbox", "blocked-forward-later-succeeded", "draft", "Edited after the connector succeeded.");
+
+    const reconciled = await domain.reconcileApprovedWork("inbox", approved.id, approved.capabilityToken, { response: "Forward succeeded after connector risk confirmation." });
+    const card = await store.readCard("inbox", "blocked-forward-later-succeeded");
+
+    expect(reconciled.status).toBe("completed");
+    expect(reconciled.response).toBe("Forward succeeded after connector risk confirmation.");
+    expect(card.status).toBe("done");
+    expect(card.history.at(-1)).toMatchObject({ type: "codex.approved_action_reconciled", detail: "Forward succeeded after connector risk confirmation." });
+  });
+
+  test("refuses to reconcile a blocked approved action that never passed action:verify", async () => {
+    const { domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertCard("inbox", {
+      id: "blocked-unverified-send",
+      title: "Send this exact reply.",
+      why: "Reconciliation must not bypass verification.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "draft", type: "editable_text", label: "Draft reply", value: "Approved draft.", editable: true }],
+      actions: [
+        { id: "send-reply", label: "Send reply", behavior: "approve_action", instruction: "Send the exact currently approved reply.", artifactBlockId: "draft", externalMutation: true, mailboxPolicy: "reply_from_source" },
+      ],
+    });
+    const approved = await domain.runCardAction("inbox", "blocked-unverified-send", "send-reply");
+    await domain.claimWork("inbox", "thread-inbox");
+    await domain.blockApprovedWork("inbox", approved.id, approved.capabilityToken, "Connector refused before verification.");
+
+    await expect(domain.reconcileApprovedWork("inbox", approved.id, approved.capabilityToken, { response: "Sent." })).rejects.toThrow("must have passed action:verify");
   });
 
   test("moves a completed approved action to done without an extra worker flag", async () => {
