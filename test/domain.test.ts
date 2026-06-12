@@ -757,6 +757,34 @@ describe("filesystem workspace", () => {
     })).rejects.toThrow("Markdown link syntax");
   });
 
+  test("requires email thread blocks to contain the full source message", async () => {
+    const { store, domain } = await setup();
+
+    await expect(domain.upsertCard("inbox", {
+      id: "summary-only-email",
+      title: "A reply needs review.",
+      why: "The user should be able to inspect the source email.",
+      blocks: [{
+        id: "email",
+        type: "email_thread",
+        text: "The sender invited Dan to dinner.",
+      }],
+    })).rejects.toThrow("full source email");
+
+    await domain.upsertCard("inbox", {
+      id: "full-email",
+      title: "A reply needs review.",
+      why: "The user can inspect the complete source email.",
+      blocks: [{
+        id: "email",
+        type: "email_thread",
+        text: "From: Cate <cate@example.com>\nTo: Dan <dan@example.com>\nSubject: Dinner\n\nWould you like to join us?",
+      }],
+    });
+
+    expect((await store.readCard("inbox", "full-email")).blocks[0].text).toContain("Would you like to join us?");
+  });
+
   test("queues a feed-level instruction when an empty feed has no active card", async () => {
     const { domain } = await setup();
     const feed = await domain.createFeedFromBrief("Research Watch\nTrack a narrow research topic.", "thread-research");

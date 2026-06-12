@@ -184,7 +184,9 @@ attention cli card:upsert --feed <feed-id> --card-file <local-json-file>
 
 Card block payloads are validated before Tend writes them. Use `text` for `memo` and `receipt`
 blocks, `items` for `evidence`, `options`, and `checklist`, and Markdown link syntax inside receipt
-text. For comparative cohort metrics, prefer one compact two-series `chart` block:
+text. An `email_thread` block must contain the authoritative source email, including `From:`,
+`To:`, and `Subject:` headers; use a `memo` block for a summary. For comparative cohort metrics,
+prefer one compact two-series `chart` block:
 
 ```json
 {

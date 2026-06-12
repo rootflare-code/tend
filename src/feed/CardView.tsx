@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { containsFullEmail } from "../../shared/emailThread";
 import { post } from "../app/api";
 import type { Card, CardAction, CardBlock, WorkItem } from "../types";
 import { DetachedLink } from "../ui/DetachedLink";
@@ -198,9 +199,10 @@ function Block({ feedId, cardId, block, onChanged }: { feedId: string; cardId: s
     return <section className="block block-receipt"><h3>{block.label ?? "Done"}</h3><p><FormattedText text={block.text} /></p></section>;
   }
   if (block.type === "email_thread") {
+    const fullEmail = containsFullEmail(block.text);
     return (
       <details className="block email-thread">
-        <summary>Read full email <kbd>O</kbd></summary>
+        <summary>{fullEmail ? "Read full email" : "Email details"} <kbd>O</kbd></summary>
         <div className="email-thread-body"><FormattedText text={block.text} /></div>
       </details>
     );

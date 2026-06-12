@@ -16,6 +16,7 @@ import type {
   WorkItem,
   WorkspaceRevision,
 } from "../shared/types";
+import { containsFullEmail } from "../shared/emailThread";
 import { AttentionStore, FEED_PROMPT_NAMES } from "./store";
 import { demoCards, feedConfig } from "./templates";
 import { detectMonologue } from "./monologue";
@@ -167,8 +168,15 @@ function validateCardBlocks(blocks: unknown): asserts blocks is CardBlock[] {
         break;
       case "rich_text":
       case "clarification":
+        validateTextBlock(block, index);
+        break;
       case "email_thread":
         validateTextBlock(block, index);
+        if (typeof block.text !== "string" || !containsFullEmail(block.text)) {
+          throw new Error(
+            `${blockDescription(block, index)} must contain the full source email with From, To, and Subject headers. Use a memo block for summaries.`,
+          );
+        }
         break;
       case "evidence":
       case "options":
