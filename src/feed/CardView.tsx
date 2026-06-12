@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { post } from "../app/api";
 import type { Card, CardAction, CardBlock, WorkItem } from "../types";
+import { DetachedLink } from "../ui/DetachedLink";
 import { FormattedText } from "../ui/FormattedText";
 import { visibleCardActions } from "./selectors";
 
@@ -99,7 +100,7 @@ function Block({ feedId, cardId, block, onChanged }: { feedId: string; cardId: s
   if (block.type === "profile" && block.profile) {
     return (
       <section className="block block-profile">
-        <a className="profile-portrait" href={block.profile.href} target="_blank" rel="noreferrer" aria-label={`Open ${block.profile.name} profile`}>
+        <DetachedLink className="profile-portrait" href={block.profile.href} aria-label={`Open ${block.profile.name} profile`}>
           <img
             src={block.profile.imageUrl}
             alt=""
@@ -109,13 +110,13 @@ function Block({ feedId, cardId, block, onChanged }: { feedId: string; cardId: s
               }
             }}
           />
-        </a>
+        </DetachedLink>
         <div className="profile-copy">
-          <a className="profile-name" href={block.profile.href} target="_blank" rel="noreferrer">{block.profile.name}</a>
+          <DetachedLink className="profile-name" href={block.profile.href}>{block.profile.name}</DetachedLink>
           {block.profile.subtitle && <span className="profile-subtitle">{block.profile.subtitle}</span>}
           {block.profile.links && (
             <div className="profile-links">
-              {block.profile.links.map((link) => <a key={link.href} href={link.href} target="_blank" rel="noreferrer">{link.label}</a>)}
+              {block.profile.links.map((link) => <DetachedLink key={link.href} href={link.href}>{link.label}</DetachedLink>)}
             </div>
           )}
         </div>
@@ -131,7 +132,7 @@ function Block({ feedId, cardId, block, onChanged }: { feedId: string; cardId: s
             {typeof item === "string"
               ? <FormattedText text={item} />
               : item.href
-                ? <a href={item.href} target="_blank" rel="noreferrer">{item.label}</a>
+                ? <DetachedLink href={item.href}>{item.label}</DetachedLink>
                 : <FormattedText text={item.label} />}
           </li>
         ))}</ul>

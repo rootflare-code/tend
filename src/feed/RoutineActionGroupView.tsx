@@ -1,4 +1,5 @@
 import type { RoutineActionGroup } from "../types";
+import { DetachedLink } from "../ui/DetachedLink";
 
 export function RoutineActionGroupView({ group, onApprove }: { group: RoutineActionGroup; onApprove: () => void }) {
   return (
@@ -21,7 +22,7 @@ export function RoutineActionGroupView({ group, onApprove }: { group: RoutineAct
                 {item.detail && <span>{item.detail}</span>}
                 <small>{item.reason}</small>
               </div>
-              {item.sourceRefs?.map((ref) => <a key={ref.href} href={ref.href} target="_blank" rel="noreferrer">{ref.label}</a>)}
+              {item.sourceRefs?.map((ref) => <DetachedLink key={ref.href} href={ref.href}>{ref.label}</DetachedLink>)}
             </li>
           ))}
         </ul>

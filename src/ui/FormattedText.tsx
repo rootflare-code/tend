@@ -1,3 +1,5 @@
+import { DetachedLink } from "./DetachedLink";
+
 function decodeTextEntities(text: string): string {
   return text
     .replace(/&lt;/g, "<")
@@ -15,9 +17,9 @@ export function FormattedText({ text = "" }: { text?: string }) {
     <>
       {parts.map((part, index) => {
         const link = part.match(/^\[([^\]]+)\]\(((?:https?:\/\/|\/api\/artifacts\/)[^)]+)\)$/);
-        if (link) return <a key={index} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a>;
+        if (link) return <DetachedLink key={index} href={link[2]}>{link[1]}</DetachedLink>;
         if (part === "\n") return <br key={index} />;
-        if (/^https?:\/\//.test(part)) return <a key={index} href={part} target="_blank" rel="noreferrer">{part}</a>;
+        if (/^https?:\/\//.test(part)) return <DetachedLink key={index} href={part}>{part}</DetachedLink>;
         if (part.startsWith("`") && part.endsWith("`")) return <code key={index}>{part.slice(1, -1)}</code>;
         return part;
       })}
