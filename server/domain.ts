@@ -251,6 +251,16 @@ function validateCardBlocks(blocks: unknown): asserts blocks is CardBlock[] {
   }
 }
 
+function validateSourceRunIds(sourceRunIds: unknown): string[] | undefined {
+  if (sourceRunIds === undefined) return undefined;
+  if (!Array.isArray(sourceRunIds) || sourceRunIds.length === 0 || sourceRunIds.some((runId) => typeof runId !== "string" || !runId.trim())) {
+    throw new Error("Card sourceRunIds must be a non-empty array of source run IDs.");
+  }
+  const normalized = sourceRunIds.map((runId) => runId.trim());
+  if (new Set(normalized).size !== normalized.length) throw new Error("Card sourceRunIds must be unique.");
+  return normalized;
+}
+
 export class AttentionDomain {
   constructor(readonly store: AttentionStore) {}
 
@@ -283,6 +293,33 @@ export class AttentionDomain {
     const staleGroups = feed.routineActions.filter((group) => group.status === "proposed" && group.id !== exceptGroupId);
     for (const group of staleGroups) await this.staleRoutineActionGroup(group, reason, exceptGroupId);
     return staleGroups.map((group) => group.id);
+  }
+
+  private async assertSourceRunIdsCurrent(feedId: string, sourceRunIds: string[], cardId?: string): Promise<void> {
+    for (const runId of sourceRunIds) {
+      let run: { id: string; feedId: string };
+      try {
+        run = await this.store.readRun(feedId, runId);
+      } catch {
+        throw new Error(`Card references an unknown source run for this feed: ${runId}`);
+      }
+      if (run.id !== runId || run.feedId !== feedId) throw new Error(`Card source run does not belong to this feed: ${runId}`);
+    }
+
+    const sweep = await this.store.readSweepState(feedId);
+    if (!sweep.currentBatchId) return;
+    const batch = await this.store.readSweepBatch(feedId, sweep.currentBatchId);
+    const currentRunIds = new Set(batch.sourceRunIds);
+    const staleRunIds = sourceRunIds.filter((runId) => !currentRunIds.has(runId));
+    if (staleRunIds.length === 0) return;
+    throw new Error(
+      `Card${cardId ? ` ${cardId}` : ""} source evidence is stale: ${staleRunIds.join(", ")} ${staleRunIds.length === 1 ? "is" : "are"} not in current sweep batch ${batch.id}. Refresh the sources and upsert the card from the current batch before acting.`,
+    );
+  }
+
+  private async assertCardSourceCurrent(card: Card): Promise<void> {
+    if (!card.sourceRunIds?.length) return;
+    await this.assertSourceRunIdsCurrent(card.feedId, card.sourceRunIds, card.id);
   }
 
   private async quarantineLegacyMutationWork(feed: FeedView, work: WorkItem): Promise<boolean> {
@@ -590,6 +627,7 @@ export class AttentionDomain {
     return this.store.serialize(async () => {
       const card = await this.store.readCard(feedId, cardId);
       if (card.status === "done") throw new Error("Done cards cannot be approved.");
+      await this.assertCardSourceCurrent(card);
       const action = configuredApprovalAction(card, cardActionId);
       requiredSourceMailbox(feedId, card, action);
       const now = isoNow();
@@ -634,6 +672,7 @@ export class AttentionDomain {
     const action = card.actions?.find((item) => item.id === cardActionId);
     if (!action) throw new Error("Card action not found.");
     if (action.behavior === "default_cleanup") return this.dismissCard(feedId, cardId);
+    await this.assertCardSourceCurrent(card);
     if (!action.instruction?.trim()) throw new Error("Card action instruction is required.");
     if (action.behavior === "queue_instruction") return this.queueInstruction(feedId, cardId, action.instruction);
     return this.approveAction(feedId, cardId, action.id);
@@ -1272,10 +1311,12 @@ export class AttentionDomain {
 
   async upsertCard(feedId: string, input: Partial<Card> & Pick<Card, "id" | "title" | "why" | "blocks">): Promise<Card> {
     validateCardBlocks(input.blocks);
+    const sourceRunIds = validateSourceRunIds(input.sourceRunIds);
     return this.store.serialize(async () => {
       const config = await this.store.readConfig(feedId);
       const now = isoNow();
       const existing = (await this.store.hasCard(feedId, input.id)) ? await this.store.readCard(feedId, input.id) : null;
+      if (sourceRunIds) await this.assertSourceRunIdsCurrent(feedId, sourceRunIds, input.id);
       const resurfaced = input.status === "to_review_new" || input.status === "to_review_updated";
       const card: Card = {
         id: input.id,
@@ -1286,6 +1327,7 @@ export class AttentionDomain {
         title: input.title,
         why: input.why,
         sourceMailbox: input.sourceMailbox ?? existing?.sourceMailbox,
+        sourceRunIds: sourceRunIds ?? existing?.sourceRunIds,
         blocks: input.blocks,
         proposedAction: input.proposedAction,
         actions: input.actions,

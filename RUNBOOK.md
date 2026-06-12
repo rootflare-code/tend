@@ -203,6 +203,19 @@ prefer one compact two-series `chart` block:
 }
 ```
 
+For source-backed cards created from a sweep, include the source run IDs that supplied the evidence:
+
+```json
+{
+  "id": "gmail-thread-example",
+  "sourceRunIds": ["run_current_sweep"]
+}
+```
+
+Tend rejects card writes and generated card actions when those source runs are no longer part of the
+current sweep batch. If a newer Gmail or Cora sweep changes the underlying truth, refresh sources and
+rewrite the card from the current batch instead of replaying an older source snapshot.
+
 For conservative batched cleanup, write one current routine group instead of several competing
 approval groups:
 

@@ -301,6 +301,45 @@ describe("filesystem workspace", () => {
     expect((await store.readSweepState("inbox")).currentBatchId).toBe(batchId);
   });
 
+  test("rejects source-backed card writes and actions from stale sweep runs", async () => {
+    const { domain, store } = await setup();
+    const oldRun = await domain.recordSourceRun("inbox", "gmail-inbox", [{ threadId: "gmail-old", subject: "Sign this" }], [{ decision: "keep" }], { cursor: "gmail-old" });
+    await domain.recordSweepBatch("inbox", [oldRun]);
+    await domain.upsertCard("inbox", {
+      id: "stale-source-action",
+      title: "Sign this agreement.",
+      why: "The old source snapshot said a signature was needed.",
+      sourceRunIds: [oldRun],
+      blocks: [{ id: "brief", type: "memo", text: "Please sign this." }],
+      actions: [{ id: "review", label: "Review agreement", behavior: "queue_instruction", instruction: "Review the agreement.", variant: "primary" }],
+    });
+
+    const newRun = await domain.recordSourceRun("inbox", "gmail-inbox", [{ threadId: "gmail-new", subject: "Signed!" }], [{ decision: "suppress" }], { cursor: "gmail-new" });
+    await domain.recordSweepBatch("inbox", [newRun]);
+
+    await expect(domain.upsertCard("inbox", {
+      id: "stale-source-action",
+      title: "Sign this agreement.",
+      why: "A stale replay should not overwrite the newer sweep.",
+      sourceRunIds: [oldRun],
+      blocks: [{ id: "brief", type: "memo", text: "Please sign this." }],
+      actions: [{ id: "review", label: "Review agreement", behavior: "queue_instruction", instruction: "Review the agreement.", variant: "primary" }],
+    })).rejects.toThrow("source evidence is stale");
+
+    await expect(domain.runCardAction("inbox", "stale-source-action", "review")).rejects.toThrow("source evidence is stale");
+
+    await domain.upsertCard("inbox", {
+      id: "stale-source-action",
+      title: "Already signed.",
+      why: "The current source snapshot shows the work is complete.",
+      sourceRunIds: [newRun],
+      blocks: [{ id: "brief", type: "memo", text: "No signing task remains." }],
+      actions: [],
+    });
+
+    expect((await store.readCard("inbox", "stale-source-action")).sourceRunIds).toEqual([newRun]);
+  });
+
   test("refuses to record raw evidence for an unconfigured source recipe", async () => {
     const { root, domain } = await setup();
     await expect(domain.recordSourceRun("inbox", "not-an-authorized-recipe", [{ threadId: "nope" }], [], { cursor: "nope" })).rejects.toThrow("Source recipe not found");

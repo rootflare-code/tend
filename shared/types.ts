@@ -139,6 +139,7 @@ export interface Card {
   eyebrow: string;
   why: string;
   sourceMailbox?: string;
+  sourceRunIds?: string[];
   blocks: CardBlock[];
   proposedAction?: ProposedAction;
   actions?: CardAction[];
