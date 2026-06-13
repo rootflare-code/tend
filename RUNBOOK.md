@@ -126,6 +126,14 @@ Read the effective recipe with:
 attention cli inspect --feed <feed-id>
 ```
 
+The inspection includes the current prompt-safe `mindContext`. If it is fresh:
+
+- Use `lens` when a signal should focus normal source queries, ranking, or framing.
+- Use `research` when a feed-relevant signal raises one bounded question and the feed's configured
+  source permissions allow that research.
+- Never treat the context summary or Chronicle excerpts as evidence for the answer.
+- Ignore context that does not fit the feed lane. A no-effect sweep is correct.
+
 Use the connector, browser, computer-use workflow, local file, or source thread described by the
 recipe. Preserve immutable retrieved evidence and record the completed run:
 
@@ -138,6 +146,28 @@ attention cli source:record-run \
   --checkpoint '<json-object>'
 ```
 
+When context influenced a run, write the context use to a local JSON file and pass it without shell
+interpolation:
+
+```json
+{
+  "updateId": "mind_...",
+  "mode": "research",
+  "signalIds": ["paywall"],
+  "researchQuestion": "What evidence-backed paywall improvements fit Every?"
+}
+```
+
+```bash
+attention cli source:record-run \
+  --feed <feed-id> \
+  --source <source-id> \
+  --snapshots '<json-array>' \
+  --judgments '<json-array>' \
+  --checkpoint '<json-object>' \
+  --context-use-file <local-json-file>
+```
+
 For a claimed `recollect_sources` item, add `--work <claimed-recollection-work-id>` to each
 `source:record-run` call. Do not pad. If nothing deserves attention, record an empty judgment set
 and stop.
@@ -146,7 +176,10 @@ After the relevant sources have completed, record one judged sweep batch separat
 refer to multiple source runs:
 
 ```bash
-attention cli sweep:record-batch --feed <feed-id> --runs '["<run-id>"]'
+attention cli sweep:record-batch \
+  --feed <feed-id> \
+  --runs '["<run-id>"]' \
+  --context <mind-update-id>
 ```
 
 For a claimed `recollect_sources` item, add `--work <claimed-recollection-work-id>`. This binds the
@@ -216,6 +249,24 @@ For source-backed cards created from a sweep, include the source run IDs that su
   "sourceRunIds": ["run_current_sweep"]
 }
 ```
+
+If context materially selected, prioritized, or reframed the card, add a distinct receipt:
+
+```json
+{
+  "contextInfluence": {
+    "updateId": "mind_...",
+    "signalIds": ["paywall"],
+    "mode": "research",
+    "effect": "selected",
+    "summary": "Prompted by the active paywall diagnosis.",
+    "researchQuestion": "What evidence-backed paywall improvements fit Every?"
+  }
+}
+```
+
+Research-mode receipts require a matching research source run. Lens-mode receipts require the same
+context update to be pinned to the current sweep. Tend rejects source-free or mismatched receipts.
 
 Tend rejects card writes and generated card actions when those source runs are no longer part of the
 current sweep batch. If a newer Gmail or Cora sweep changes the underlying truth, refresh sources and

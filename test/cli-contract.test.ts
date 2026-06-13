@@ -10,6 +10,10 @@ describe("CLI contract", () => {
     const commandNames = new Set(CLI_COMMANDS.map(cliCommandName));
 
     expect(commandNames).toContain("feed:bind");
+    expect(commandNames).toContain("context:bind");
+    expect(commandNames).toContain("context:publish");
+    expect(commandNames).toContain("context:status");
+    expect(commandNames).toContain("context:for-feed");
     expect(commandNames).toContain("work:list");
     expect(commandNames).toContain("work:claim");
     expect(commandNames).toContain("action:verify");

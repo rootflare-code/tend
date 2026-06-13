@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AttentionDomain } from "./server/domain";
+import { AttentionDomain, mindContextPublicationReceipt } from "./server/domain";
 import { CLI_COMMANDS, INTERNAL_CLI_COMMANDS } from "./server/cli/contract";
 import { MissingFlagError, formatCliError } from "./server/cli/errors";
 import { importLegacyAttentionCard, importLegacyInboxCard } from "./server/cli/legacyImports";
@@ -51,6 +51,20 @@ try {
   case "setup:detect-monologue":
     output = await domain.detectLocalMonologue();
     break;
+  case "context:bind":
+    output = await domain.bindMindContextPublisher(required("thread"), flag("replace"));
+    break;
+  case "context:publish":
+    output = mindContextPublicationReceipt(
+      await domain.publishMindContext(required("thread"), JSON.parse(await readFile(required("context-file"), "utf8"))),
+    );
+    break;
+  case "context:status":
+    output = await domain.readMindContextStatus();
+    break;
+  case "context:for-feed":
+    output = await domain.readMindContextForFeed(required("feed"));
+    break;
   case "feed:create":
     output = await domain.createFeedFromBrief(required("brief"), value("thread") ?? null);
     break;
@@ -75,10 +89,18 @@ try {
     output = { ok: true };
     break;
   case "source:record-run":
-    output = await domain.recordSourceRun(required("feed"), required("source"), json(required("snapshots")), json(required("judgments")), json(required("checkpoint")), value("work"));
+    output = await domain.recordSourceRun(
+      required("feed"),
+      required("source"),
+      json(required("snapshots")),
+      json(required("judgments")),
+      json(required("checkpoint")),
+      value("work"),
+      value("context-use") || value("context-use-file") ? await structured("context-use") : undefined,
+    );
     break;
   case "sweep:record-batch":
-    output = await domain.recordSweepBatch(required("feed"), json(required("runs")), value("work"));
+    output = await domain.recordSweepBatch(required("feed"), json(required("runs")), value("work"), value("context"));
     break;
   case "sweep:rejudge":
     output = await domain.recordSweepRejudgment(required("feed"), required("feedback"), json(required("ordered-cards")), json(required("removed-cards")));

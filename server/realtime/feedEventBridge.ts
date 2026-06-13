@@ -3,12 +3,14 @@ import type { FeedEvent } from "../../shared/types";
 type FeedEventReader = {
   listFeedIds(): Promise<string[]>;
   readEvents(feedId: string): Promise<FeedEvent[]>;
+  readMindContextCursor?(): Promise<string>;
 };
 
 type Notify = (data: unknown) => void;
 
 export function createFeedEventBridge(store: FeedEventReader, notify: Notify, options: { intervalMs?: number } = {}) {
   const cursors = new Map<string, string>();
+  let mindContextCursor = "";
   const intervalMs = options.intervalMs ?? 1_000;
   let seeded = false;
   let polling = false;
@@ -27,6 +29,12 @@ export function createFeedEventBridge(store: FeedEventReader, notify: Notify, op
         cursors.set(feedId, cursor);
         if (seeded && previous !== undefined && previous !== cursor) changed = true;
         if (seeded && previous === undefined) changed = true;
+      }
+
+      if (store.readMindContextCursor) {
+        const nextMindContextCursor = await store.readMindContextCursor();
+        if (seeded && nextMindContextCursor !== mindContextCursor) changed = true;
+        mindContextCursor = nextMindContextCursor;
       }
 
       seeded = true;

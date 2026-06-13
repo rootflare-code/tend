@@ -30,6 +30,11 @@ ATTENTION_HOME=/path/to/attention attention start
 - `data/feeds/*/events.jsonl` mirrors feed audit events for backup compatibility and readable local debugging.
 - `data/feeds/*/work/*.json` mirrors work items for backup compatibility and readable local debugging.
 - `data/feeds/*/feed.md` stores a readable feed description. `data/feeds/*/raw/**` stores immutable raw evidence snapshots.
+- `data/mind-context/binding.json` mirrors the one bound Chronicle publisher.
+- `data/mind-context/updates/*.json` mirrors recent privacy-filtered On Your Mind publications and
+  retains older records while a card references them for provenance.
+  Full filtered OCR exists only in these local records and the dedicated `/mind` detail API; it is
+  omitted from publication receipts, normal feed CLI output, cards, and logs.
 
 ## Connector Credentials
 

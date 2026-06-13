@@ -19,6 +19,12 @@ flowchart LR
 
 The current domain model keeps the richest authoring artifacts readable in local file mirrors while moving active runtime records into SQLite. Active feed membership, editable prompt/policy documents, feed cards, routine action groups, source recipes/checkpoints, source run records, sweep state/artifacts, revision records, feed audit events, and work items are now behind repository interfaces with SQLite as the runtime authority and readable files as backup-compatible mirrors.
 
+On Your Mind is a workspace-level contextual layer beside feeds. One bound Chronicle thread
+publishes ordered, privacy-filtered updates. Feed runners receive a prompt-safe summary before
+collection; the dedicated `/mind` workspace can read the complete filtered observation windows.
+Context may focus source work or originate a bounded research question, but independently collected
+feed sources remain the evidence boundary.
+
 The installed `attention` executable is the canonical runtime entrypoint. `attention start`
 re-launches the same executable in the background with the current `PATH`, `ATTENTION_HOME`, and
 port settings. `attention start --foreground` keeps the server attached to the current terminal.

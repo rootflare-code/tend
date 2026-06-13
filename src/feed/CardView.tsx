@@ -234,6 +234,28 @@ function QueuedNoteEditor({ work, onChanged }: { work: WorkItem; onChanged: () =
   );
 }
 
+function ContextInfluenceReceipt({ card }: { card: Card }) {
+  const influence = card.contextInfluence;
+  if (!influence) return null;
+  const sourceCount = influence.sourceCount ?? 0;
+  const signalId = influence.signalIds[0];
+  return (
+    <section className={`context-influence context-influence-${influence.mode}`}>
+      <div className="context-influence-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v4M12 18v4M2 12h4M18 12h4" /></svg>
+      </div>
+      <div>
+        <span className="context-influence-label">{influence.mode === "research" ? "Prompted by On Your Mind" : "On your mind"}</span>
+        <p>{influence.summary}</p>
+        {influence.researchQuestion && <small>{influence.researchQuestion}</small>}
+        <a href={`/mind/${encodeURIComponent(influence.updateId)}#signal-${encodeURIComponent(signalId)}`} onClick={(event) => event.stopPropagation()}>
+          View context and {sourceCount} {sourceCount === 1 ? "source" : "sources"} <span aria-hidden="true">→</span>
+        </a>
+      </div>
+    </section>
+  );
+}
+
 export function CardView({
   card,
   queuedNote,
@@ -256,7 +278,7 @@ export function CardView({
     ? "Archive, or tell Codex what to do"
     : card.proposedAction?.label ?? actions.find((action) => action.variant === "primary")?.label ?? actions[0]?.label;
   return (
-    <article className={`attention-card ${active ? "is-active" : ""}`} data-card-id={card.id} onClick={onActivate} onMouseEnter={onActivate}>
+    <article className={`attention-card ${card.contextInfluence ? "has-context-influence" : ""} ${active ? "is-active" : ""}`} data-card-id={card.id} onClick={onActivate} onMouseEnter={onActivate}>
       <div className="card-rule" />
       <header className="card-head">
         <span className={`kind-dot ${card.kind === "feed_improvement" ? "proposal" : ""}`} />
@@ -266,6 +288,7 @@ export function CardView({
         </div>
       </header>
       <p className="why"><FormattedText text={card.why} /></p>
+      <ContextInfluenceReceipt card={card} />
       <div className="blocks">
         {card.blocks.map((block) => <Block key={block.id} feedId={card.feedId} cardId={card.id} block={block} onChanged={onChanged} />)}
       </div>

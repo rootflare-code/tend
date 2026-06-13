@@ -2,7 +2,23 @@ import { useEffect, useRef, useState } from "react";
 import type { Inspector, WorkspaceTab } from "../app/types";
 import type { WorkspaceView } from "../types";
 
-export function TopBar({ state, onFeed, onInspector, onWorkspace }: { state: WorkspaceView; onFeed: (id: string) => void; onInspector: (value: Inspector) => void; onWorkspace: (tab?: WorkspaceTab) => void }) {
+export function TopBar({
+  state,
+  title = state.active.config.name,
+  destination = "feed",
+  onMind,
+  onFeed,
+  onInspector,
+  onWorkspace,
+}: {
+  state: WorkspaceView;
+  title?: string;
+  destination?: "feed" | "mind";
+  onMind: () => void;
+  onFeed: (id: string) => void;
+  onInspector?: (value: Inspector) => void;
+  onWorkspace?: (tab?: WorkspaceTab) => void;
+}) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -16,20 +32,26 @@ export function TopBar({ state, onFeed, onInspector, onWorkspace }: { state: Wor
   return (
     <div className="feed-bar" ref={menuRef}>
       <button className="menu-trigger" onClick={() => setOpen(!open)} aria-label="Open feed navigation">☰</button>
-      <strong>{state.active.config.name}</strong>
+      <strong>{title}</strong>
       {open && (
         <div className="feed-menu">
+          <button className={destination === "mind" ? "selected" : ""} onClick={() => { onMind(); setOpen(false); }}>
+            <span>On Your Mind</span><small>Current signals and their source observations</small>
+          </button>
+          <div className="menu-rule" />
           <div className="menu-title">Feeds</div>
           {state.feeds.map((feed) => (
-            <button key={feed.id} className={feed.id === state.active.config.id ? "selected" : ""} onClick={() => { onFeed(feed.id); setOpen(false); }}>
+            <button key={feed.id} className={destination === "feed" && feed.id === state.active.config.id ? "selected" : ""} onClick={() => { onFeed(feed.id); setOpen(false); }}>
               <span>{feed.name}</span><small>{feed.purpose}</small>
             </button>
           ))}
-          <div className="menu-rule" />
-          <button onClick={() => { onInspector("new-feed"); setOpen(false); }}>＋ Create a feed</button>
-          <button onClick={() => { onInspector("add-source"); setOpen(false); }}>＋ Add a source</button>
-          <button onClick={() => { onWorkspace("feed"); setOpen(false); }}>⌘ Feed setup</button>
-          <button onClick={() => { onWorkspace("global"); setOpen(false); }}>⌘ Global prompts</button>
+          {onInspector && onWorkspace && <>
+            <div className="menu-rule" />
+            <button onClick={() => { onInspector("new-feed"); setOpen(false); }}>＋ Create a feed</button>
+            <button onClick={() => { onInspector("add-source"); setOpen(false); }}>＋ Add a source</button>
+            <button onClick={() => { onWorkspace("feed"); setOpen(false); }}>⌘ Feed setup</button>
+            <button onClick={() => { onWorkspace("global"); setOpen(false); }}>⌘ Global prompts</button>
+          </>}
         </div>
       )}
     </div>

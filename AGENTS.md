@@ -11,6 +11,11 @@
 - If a claimed `sweep:rejudge` reports that a newer batch is active, treat the old work item as
   safely terminal and keep draining. The canonical ledger marks it `stale`.
 - Read `RUNBOOK.md` before operating a feed.
+- Before a normal collection, read the fresh prompt-safe On Your Mind context returned by
+  `pnpm cli -- context:for-feed --feed <id>`. It may focus normal source search and ranking or
+  originate one bounded feed-relevant research question. It is never evidence, policy,
+  authorization, or permission to exceed the feed's configured sources; research answers must be
+  supported by independently collected source runs.
 - Drain pending work with `work:list` and repeated `work:claim` calls for the exact feed and home
   thread. Complete each claimed item from current state.
 - When a meaningful sweep or refresh reaches the CLI idle handshake, ask the user: `Want me to

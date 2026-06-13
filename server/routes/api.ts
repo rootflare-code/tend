@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { VoiceTarget } from "../../shared/types";
+import { mindContextPublicationReceipt } from "../domain";
 import { versionInfo } from "../version";
 import { body, mutation, type LocalRouteContext } from "./shared";
 
@@ -12,6 +13,18 @@ export function apiRoutes(context: LocalRouteContext): Hono {
   app.get("/api/status", (c) => c.json({ ok: true, version: versionInfo(), dataDir, sqlite: sqlite.status() }));
   app.get("/api/state", async (c) => c.json(await store.readWorkspace(c.req.query("feed") ?? "inbox")));
   app.get("/api/health", (c) => c.json({ ok: true }));
+  app.get("/api/mind-context/current", async (c) => {
+    c.header("cache-control", "no-store");
+    return c.json(await domain.readMindContextWorkspace());
+  });
+  app.get("/api/mind-context/:update", async (c) => {
+    c.header("cache-control", "no-store");
+    try {
+      return c.json(await domain.readMindContextUpdate(c.req.param("update")));
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 404);
+    }
+  });
   app.get("/api/artifacts/:name", async (c) => {
     const name = c.req.param("name");
     const artifactTypes: Record<string, { directory: string; contentType: string }> = {
@@ -35,6 +48,12 @@ export function apiRoutes(context: LocalRouteContext): Hono {
   app.post("/api/feeds", async (c) => mutation(c, notify, async () => {
     const input = await body(c);
     return domain.createFeedFromBrief(String(input.brief ?? ""), input.currentThreadId ? String(input.currentThreadId) : null);
+  }));
+  app.post("/api/mind-context", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return mindContextPublicationReceipt(
+      await domain.publishMindContext(String(input.threadId ?? ""), input.context as any),
+    );
   }));
   app.post("/api/feeds/:feed/bind", async (c) => mutation(c, notify, async () => domain.bindFeed(c.req.param("feed"), String((await body(c)).threadId ?? ""))));
   app.post("/api/feeds/:feed/heartbeat", async (c) => mutation(c, notify, async () => domain.proposeHeartbeat(c.req.param("feed"), String((await body(c)).cadence ?? ""))));

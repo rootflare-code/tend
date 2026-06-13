@@ -1,6 +1,7 @@
 import { Navigate, createRootRoute, createRoute, createRouter, useParams } from "@tanstack/react-router";
 import App from "./App";
 import type { AttentionScreen, WorkspaceTab } from "./app/types";
+import { OnYourMindPage } from "./mind/OnYourMindPage";
 
 const rootRoute = createRootRoute();
 
@@ -14,6 +15,18 @@ const feedRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/feed/$feedId",
   component: () => <RouteApp screen="feed" workspaceTab="feed" />,
+});
+
+const mindRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/mind",
+  component: OnYourMindPage,
+});
+
+const historicalMindRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/mind/$updateId",
+  component: OnYourMindPage,
 });
 
 const feedPromptsRoute = createRoute({
@@ -41,6 +54,8 @@ function RouteApp({ screen, workspaceTab }: { screen: AttentionScreen; workspace
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  mindRoute,
+  historicalMindRoute,
   feedRoute,
   feedPromptsRoute,
   globalPromptsRoute,

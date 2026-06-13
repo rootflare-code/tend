@@ -37,7 +37,7 @@ try {
   if (status.version?.cliContractVersion !== CLI_CONTRACT_VERSION) {
     throw new Error(`/api/status reported CLI contract ${status.version?.cliContractVersion} instead of ${CLI_CONTRACT_VERSION}.`);
   }
-  if (schemaVersion !== 11) throw new Error(`/api/status reported schema ${schemaVersion} instead of 11.`);
+  if (schemaVersion !== 12) throw new Error(`/api/status reported schema ${schemaVersion} instead of 12.`);
   const ui = await fetchUi();
   const cli = await validateCliContract();
   console.log(JSON.stringify({ ok: true, statusUrl, version: status.version, schemaVersion, ui, cli, binaryVersion, binaryPath, cwd, home }, null, 2));
@@ -52,13 +52,17 @@ async function validateCliContract(): Promise<{ commands: string[]; workspace: b
   const commands = help.commands ?? [];
   const requiredCommands = [
     "state [--feed inbox]",
+    "context:bind --thread <Chronicle thread id> [--replace]",
+    "context:publish --thread <Chronicle thread id> --context-file <path>",
+    "context:status",
+    "context:for-feed --feed <id>",
     "feed:bind --feed <id> --thread <Codex thread id>",
     "work:list --feed <id> --thread <id> [--cross-feed]",
     "work:claim --feed <id> --thread <id> [--cross-feed]",
     "work:complete --feed <id> --work <id> --token <token> --result <json>",
     "card:upsert --feed <id> (--card <json> | --card-file <path>)",
-    "source:record-run --feed <id> --source <id> --snapshots <json> --judgments <json> --checkpoint <json> [--work <recollection-work-id>]",
-    "sweep:record-batch --feed <id> --runs <json-array> [--work <recollection-work-id>]",
+    "source:record-run --feed <id> --source <id> --snapshots <json> --judgments <json> --checkpoint <json> [--work <recollection-work-id>] [--context-use <json> | --context-use-file <path>]",
+    "sweep:record-batch --feed <id> --runs <json-array> [--work <recollection-work-id>] [--context <mind-update-id>]",
     "learning:request --feed <id>",
   ];
   const missingCommands = requiredCommands.filter((command) => !commands.includes(command));

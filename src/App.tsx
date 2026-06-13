@@ -106,6 +106,9 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
       void navigate({ to: "/feed/$feedId", params: { feedId: id } });
     }
   };
+  const openMind = () => {
+    void navigate({ to: "/mind" });
+  };
 
   const openWorkspace = (nextTab: WorkspaceTab = "feed") => {
     setWorkspaceFocus(null);
@@ -320,7 +323,7 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
 
   if (screen === "workspace") return withRealtime(
     <>
-      <TopBar state={state} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
+      <TopBar state={state} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
       <div className="workspace-proposals"><RevisionProposals proposals={state.proposals} onApply={applyProposal} onReject={rejectProposal} onReviewLearning={openLearningReview} /></div>
       <PromptWorkspace state={state} tab={workspaceTab} onTab={openWorkspace} onBack={closeWorkspace} onInspector={setInspector} onSaved={showToast} onTargetFocus={(target) => { setWorkspaceFocus(target); selectDockTarget(target); }} />
       <Dock state={state} feed={feed} target={resolvedDockTarget} ladder={ladder} targetVersion={targetVersion} onTarget={selectDockTarget} onSubmit={instruct} onRecollect={recollect} />
@@ -331,7 +334,7 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
 
   if (screen === "learnings") return withRealtime(
     <>
-      <TopBar state={state} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
+      <TopBar state={state} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
       <LearningReview feed={feed} proposals={compoundProposals} onBack={closeWorkspace} onApply={applyLearningProposal} onReject={rejectLearningProposal} />
       <Dock state={state} feed={feed} target={resolvedDockTarget} ladder={ladder} targetVersion={targetVersion} onTarget={selectDockTarget} onSubmit={instruct} onRecollect={recollect} />
       <InspectorPanel value={inspector} state={state} onClose={() => setInspector(null)} onChanged={(next) => { if (next) changeFeed(next); void refresh(next); }} />
@@ -344,7 +347,7 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
   const feedWork = feed.work.filter((work) => work.cardId === "__feed__" && work.status === tab);
   return withRealtime(
     <>
-      <TopBar state={state} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
+      <TopBar state={state} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
       <nav className="tabs">
         {(["review", "queued", "working", "done"] as Tab[]).map((item) => (
           <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>

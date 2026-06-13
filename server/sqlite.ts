@@ -2,9 +2,10 @@ import { Database } from "bun:sqlite";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { attentionDbPath } from "./paths";
-import type { Card, FeedEvent, PolicyRevision, RevisionProposal, RoutineActionGroup, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceRevision } from "../shared/types";
+import type { Card, FeedEvent, MindContextBinding, MindContextUpdate, PolicyRevision, RevisionProposal, RoutineActionGroup, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceRevision } from "../shared/types";
 import type { CardRepository } from "./repositories/cards";
 import type { FeedEventRepository } from "./repositories/feedEvents";
+import { defaultMindContextBinding, type MindContextRepository } from "./repositories/mindContext";
 import type { RevisionRepository } from "./repositories/revisions";
 import type { RoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import type { SourceRunRepository } from "./repositories/sourceRuns";
@@ -14,7 +15,7 @@ import type { TextDocumentRepository, TextDocumentSeed } from "./repositories/te
 import type { WorkItemRepository } from "./repositories/workItems";
 import type { WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
 
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 export type LocalRuntimeStatus = {
   dbPath: string;
@@ -40,6 +41,18 @@ export class LocalSqliteStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS mind_context_binding (
+        slot INTEGER PRIMARY KEY CHECK (slot = 1),
+        payload_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS mind_context_updates (
+        id TEXT PRIMARY KEY,
+        source_thread_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        published_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mind_context_updates_published ON mind_context_updates (published_at, id);
       CREATE TABLE IF NOT EXISTS workspace_feeds (
         feed_id TEXT PRIMARY KEY,
         position INTEGER NOT NULL,
@@ -192,6 +205,10 @@ export class LocalSqliteStore {
     return new SqliteFeedEventRepository(() => this.database());
   }
 
+  mindContext(): MindContextRepository {
+    return new SqliteMindContextRepository(() => this.database());
+  }
+
   revisions(): RevisionRepository {
     return new SqliteRevisionRepository(() => this.database());
   }
@@ -239,6 +256,75 @@ export class LocalSqliteStore {
 
   private setMeta(key: string, value: string): void {
     this.database().query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+}
+
+class SqliteMindContextRepository implements MindContextRepository {
+  constructor(private readonly database: () => Database) {}
+
+  async init(): Promise<void> {
+    const row = this.database().query("SELECT 1 AS found FROM mind_context_binding WHERE slot = 1").get() as { found: number } | undefined;
+    if (!row) await this.writeBinding(defaultMindContextBinding());
+  }
+
+  async readBinding(): Promise<MindContextBinding> {
+    const row = this.database()
+      .query("SELECT payload_json FROM mind_context_binding WHERE slot = 1")
+      .get() as { payload_json: string } | undefined;
+    return row ? JSON.parse(row.payload_json) as MindContextBinding : defaultMindContextBinding();
+  }
+
+  async writeBinding(binding: MindContextBinding): Promise<void> {
+    this.database()
+      .query("INSERT INTO mind_context_binding (slot, payload_json) VALUES (1, ?) ON CONFLICT(slot) DO UPDATE SET payload_json = excluded.payload_json")
+      .run(JSON.stringify(binding));
+  }
+
+  async readCursor(): Promise<string> {
+    const row = this.database()
+      .query(`
+        SELECT
+          COUNT(*) AS count,
+          COALESCE((SELECT published_at FROM mind_context_updates ORDER BY published_at DESC, id DESC LIMIT 1), '') AS published_at,
+          COALESCE((SELECT id FROM mind_context_updates ORDER BY published_at DESC, id DESC LIMIT 1), '') AS id,
+          COALESCE((SELECT payload_json FROM mind_context_binding WHERE slot = 1), '') AS binding
+        FROM mind_context_updates
+      `)
+      .get() as { count: number; published_at: string; id: string; binding: string };
+    return `${row.binding}:${row.count}:${row.published_at}:${row.id}`;
+  }
+
+  async listUpdates(): Promise<MindContextUpdate[]> {
+    const rows = this.database()
+      .query("SELECT payload_json FROM mind_context_updates ORDER BY published_at ASC, id ASC")
+      .all() as Array<{ payload_json: string }>;
+    return rows.map((row) => JSON.parse(row.payload_json) as MindContextUpdate);
+  }
+
+  async getUpdate(updateId: string): Promise<MindContextUpdate> {
+    const row = this.database()
+      .query("SELECT payload_json FROM mind_context_updates WHERE id = ?")
+      .get(updateId) as { payload_json: string } | undefined;
+    if (!row) throw new Error(`Mind context update not found: ${updateId}`);
+    return JSON.parse(row.payload_json) as MindContextUpdate;
+  }
+
+  async writeUpdate(update: MindContextUpdate): Promise<void> {
+    this.database()
+      .query(`
+        INSERT INTO mind_context_updates (id, source_thread_id, state, published_at, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          source_thread_id = excluded.source_thread_id,
+          state = excluded.state,
+          published_at = excluded.published_at,
+          payload_json = excluded.payload_json
+      `)
+      .run(update.id, update.sourceThreadId, update.state, update.publishedAt, JSON.stringify(update));
+  }
+
+  async removeUpdate(updateId: string): Promise<void> {
+    this.database().query("DELETE FROM mind_context_updates WHERE id = ?").run(updateId);
   }
 }
 

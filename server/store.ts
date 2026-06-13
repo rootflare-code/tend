@@ -9,6 +9,8 @@ import type {
   FeedConfig,
   FeedEvent,
   FeedView,
+  MindContextBinding,
+  MindContextUpdate,
   PolicyRevision,
   RevisionProposal,
   RoutineActionGroup,
@@ -40,6 +42,7 @@ import { isoNow, makeId, readJson, writeJson, writeText } from "./util";
 import { defaultDictationCapability } from "./monologue";
 import { FileCardRepository, type CardRepository } from "./repositories/cards";
 import { FileFeedEventRepository, type FeedEventRepository } from "./repositories/feedEvents";
+import { FileMindContextRepository, type MindContextRepository } from "./repositories/mindContext";
 import { FileRevisionRepository, type RevisionRepository } from "./repositories/revisions";
 import { FileRoutineActionGroupRepository, type RoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import { FileSourceRunRepository, type SourceRunRepository } from "./repositories/sourceRuns";
@@ -62,6 +65,7 @@ export class AttentionStore {
   private tail = Promise.resolve();
   private readonly cards: CardRepository;
   private readonly events: FeedEventRepository;
+  private readonly mindContext: MindContextRepository;
   private readonly revisions: RevisionRepository;
   private readonly routineActionGroups: RoutineActionGroupRepository;
   private readonly sourceRuns: SourceRunRepository;
@@ -71,10 +75,11 @@ export class AttentionStore {
   private readonly workItems: WorkItemRepository;
   private readonly workspaceFeeds: WorkspaceFeedRepository;
 
-  constructor(dataDir: string, options: { cards?: CardRepository; events?: FeedEventRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceFeeds?: WorkspaceFeedRepository } = {}) {
+  constructor(dataDir: string, options: { cards?: CardRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceFeeds?: WorkspaceFeedRepository } = {}) {
     this.dataDir = dataDir;
     this.cards = options.cards ?? new FileCardRepository(this.dataDir);
     this.events = options.events ?? new FileFeedEventRepository(this.dataDir);
+    this.mindContext = options.mindContext ?? new FileMindContextRepository(this.dataDir);
     this.revisions = options.revisions ?? new FileRevisionRepository(this.dataDir);
     this.routineActionGroups = options.routineActionGroups ?? new FileRoutineActionGroupRepository(this.dataDir);
     this.sourceRuns = options.sourceRuns ?? new FileSourceRunRepository(this.dataDir);
@@ -95,6 +100,7 @@ export class AttentionStore {
     await this.ensureTextDocumentSeeds(this.globalTextDocumentSeeds());
     await this.cards.init(feedIds);
     await this.events.init(feedIds);
+    await this.mindContext.init();
     await this.revisions.init(feedIds);
     await this.routineActionGroups.init(feedIds);
     await this.sourceRuns.init(feedIds);
@@ -136,6 +142,34 @@ export class AttentionStore {
 
   async readDictationCapability(): Promise<DictationCapability> {
     return readJson<DictationCapability>(this.path("integrations/dictation.json"));
+  }
+
+  async readMindContextBinding(): Promise<MindContextBinding> {
+    return this.mindContext.readBinding();
+  }
+
+  async writeMindContextBinding(binding: MindContextBinding): Promise<void> {
+    await this.mindContext.writeBinding(binding);
+  }
+
+  async readMindContextCursor(): Promise<string> {
+    return this.mindContext.readCursor();
+  }
+
+  async listMindContextUpdates(): Promise<MindContextUpdate[]> {
+    return this.mindContext.listUpdates();
+  }
+
+  async readMindContextUpdate(updateId: string): Promise<MindContextUpdate> {
+    return this.mindContext.getUpdate(updateId);
+  }
+
+  async writeMindContextUpdate(update: MindContextUpdate): Promise<void> {
+    await this.mindContext.writeUpdate(update);
+  }
+
+  async removeMindContextUpdate(updateId: string): Promise<void> {
+    await this.mindContext.removeUpdate(updateId);
   }
 
   async writeDictationCapability(capability: DictationCapability): Promise<void> {
@@ -340,6 +374,10 @@ export class AttentionStore {
 
   async readCard(feedId: string, cardId: string): Promise<Card> {
     return this.cards.get(feedId, cardId);
+  }
+
+  async listCards(feedId: string): Promise<Card[]> {
+    return this.cards.list(feedId);
   }
 
   async hasCard(feedId: string, cardId: string): Promise<boolean> {

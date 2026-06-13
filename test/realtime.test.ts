@@ -28,4 +28,31 @@ describe("feed event bridge", () => {
     expect(notifications).toHaveLength(1);
     expect(notifications[0]).toMatchObject({ source: "feed-events" });
   });
+
+  test("notifies when Chronicle publishes a new On Your Mind update", async () => {
+    let contextCursor = "1:2026-06-13T18:00:00.000Z:mind-1";
+    const notifications: unknown[] = [];
+    const bridge = createFeedEventBridge(
+      {
+        async listFeedIds() {
+          return [];
+        },
+        async readEvents() {
+          return [];
+        },
+        async readMindContextCursor() {
+          return contextCursor;
+        },
+      },
+      (data) => notifications.push(data),
+    );
+
+    await bridge.poll();
+    expect(notifications).toHaveLength(0);
+
+    contextCursor = "2:2026-06-13T19:00:00.000Z:mind-2";
+    await bridge.poll();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({ source: "feed-events" });
+  });
 });
