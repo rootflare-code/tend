@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { SQLITE_SCHEMA_VERSION } from "../server/sqlite";
 import { APP_VERSION, CLI_CONTRACT_VERSION } from "../server/version";
 
 const binaryPath = path.resolve(process.env.ATTENTION_BINARY ?? path.join("dist-bin", "attention"));
@@ -37,7 +38,9 @@ try {
   if (status.version?.cliContractVersion !== CLI_CONTRACT_VERSION) {
     throw new Error(`/api/status reported CLI contract ${status.version?.cliContractVersion} instead of ${CLI_CONTRACT_VERSION}.`);
   }
-  if (schemaVersion !== 12) throw new Error(`/api/status reported schema ${schemaVersion} instead of 12.`);
+  if (schemaVersion !== SQLITE_SCHEMA_VERSION) {
+    throw new Error(`/api/status reported schema ${schemaVersion} instead of ${SQLITE_SCHEMA_VERSION}.`);
+  }
   const ui = await fetchUi();
   const cli = await validateCliContract();
   console.log(JSON.stringify({ ok: true, statusUrl, version: status.version, schemaVersion, ui, cli, binaryVersion, binaryPath, cwd, home }, null, 2));

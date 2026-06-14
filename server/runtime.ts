@@ -5,6 +5,7 @@ import { attentionDataDir, attentionDbPath, attentionHome } from "./paths";
 import { FileCardRepository, MirroredCardRepository } from "./repositories/cards";
 import { FileFeedEventRepository, MirroredFeedEventRepository } from "./repositories/feedEvents";
 import { FileMindContextRepository, MirroredMindContextRepository } from "./repositories/mindContext";
+import { FileMobileCommandReceiptRepository, MirroredMobileCommandReceiptRepository } from "./repositories/mobileCommandReceipts";
 import { FileRevisionRepository, MirroredRevisionRepository } from "./repositories/revisions";
 import { FileRoutineActionGroupRepository, MirroredRoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import { FileSourceRunRepository, MirroredSourceRunRepository } from "./repositories/sourceRuns";
@@ -53,6 +54,10 @@ export async function createLocalRuntime(
     sqlite.mindContext(),
     new FileMindContextRepository(dataDir),
   );
+  const mobileCommandReceipts = new MirroredMobileCommandReceiptRepository(
+    sqlite.mobileCommandReceipts(),
+    new FileMobileCommandReceiptRepository(dataDir),
+  );
   const revisions = new MirroredRevisionRepository(
     sqlite.revisions(),
     new FileRevisionRepository(dataDir),
@@ -85,7 +90,7 @@ export async function createLocalRuntime(
     sqlite.textDocuments(),
     new FileTextDocumentRepository(dataDir),
   );
-  const store = new AttentionStore(dataDir, { cards, events, mindContext, revisions, routineActionGroups, sourceRuns, sources, sweeps, textDocuments, workItems, workspaceFeeds });
+  const store = new AttentionStore(dataDir, { cards, events, mindContext, mobileCommandReceipts, revisions, routineActionGroups, sourceRuns, sources, sweeps, textDocuments, workItems, workspaceFeeds });
   await store.init();
   return { dataDir, sqlite, store };
 }

@@ -3,9 +3,11 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { attentionDbPath } from "./paths";
 import type { Card, FeedEvent, MindContextBinding, MindContextUpdate, PolicyRevision, RevisionProposal, RoutineActionGroup, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceRevision } from "../shared/types";
+import type { MobileCommandReceipt } from "../shared/mobile";
 import type { CardRepository } from "./repositories/cards";
 import type { FeedEventRepository } from "./repositories/feedEvents";
 import { defaultMindContextBinding, type MindContextRepository } from "./repositories/mindContext";
+import type { MobileCommandReceiptRepository } from "./repositories/mobileCommandReceipts";
 import type { RevisionRepository } from "./repositories/revisions";
 import type { RoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import type { SourceRunRepository } from "./repositories/sourceRuns";
@@ -15,7 +17,7 @@ import type { TextDocumentRepository, TextDocumentSeed } from "./repositories/te
 import type { WorkItemRepository } from "./repositories/workItems";
 import type { WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
 
-const SCHEMA_VERSION = 12;
+export const SQLITE_SCHEMA_VERSION = 13;
 
 export type LocalRuntimeStatus = {
   dbPath: string;
@@ -53,6 +55,14 @@ export class LocalSqliteStore {
         payload_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_mind_context_updates_published ON mind_context_updates (published_at, id);
+      CREATE TABLE IF NOT EXISTS mobile_command_receipts (
+        command_id TEXT PRIMARY KEY,
+        feed_id TEXT NOT NULL,
+        card_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS workspace_feeds (
         feed_id TEXT PRIMARY KEY,
         position INTEGER NOT NULL,
@@ -69,32 +79,35 @@ export class LocalSqliteStore {
       );
       CREATE INDEX IF NOT EXISTS idx_feed_events_feed_at ON feed_events (feed_id, at);
       CREATE TABLE IF NOT EXISTS cards (
-        id TEXT PRIMARY KEY,
         feed_id TEXT NOT NULL,
+        id TEXT NOT NULL,
         kind TEXT NOT NULL,
         status TEXT NOT NULL,
         ready_for_pass INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        payload_json TEXT NOT NULL
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (feed_id, id)
       );
       CREATE INDEX IF NOT EXISTS idx_cards_feed_status ON cards (feed_id, status);
       CREATE TABLE IF NOT EXISTS routine_action_groups (
-        id TEXT PRIMARY KEY,
         feed_id TEXT NOT NULL,
+        id TEXT NOT NULL,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        payload_json TEXT NOT NULL
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (feed_id, id)
       );
       CREATE INDEX IF NOT EXISTS idx_routine_action_groups_feed_status ON routine_action_groups (feed_id, status);
       CREATE TABLE IF NOT EXISTS source_runs (
-        id TEXT PRIMARY KEY,
         feed_id TEXT NOT NULL,
+        id TEXT NOT NULL,
         source_id TEXT NOT NULL,
         trigger_work_id TEXT,
         completed_at TEXT,
-        payload_json TEXT NOT NULL
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (feed_id, id)
       );
       CREATE INDEX IF NOT EXISTS idx_source_runs_feed_source ON source_runs (feed_id, source_id);
       CREATE INDEX IF NOT EXISTS idx_source_runs_trigger_work ON source_runs (trigger_work_id);
@@ -174,8 +187,9 @@ export class LocalSqliteStore {
       );
       CREATE INDEX IF NOT EXISTS idx_work_items_feed_status ON work_items (feed_id, status);
     `);
+    this.migrateFeedScopedPrimaryKeys();
     const now = new Date().toISOString();
-    this.setMeta("schema_version", String(SCHEMA_VERSION));
+    this.setMeta("schema_version", String(SQLITE_SCHEMA_VERSION));
     if (!this.getMeta("created_at")) this.setMeta("created_at", now);
     this.setMeta("updated_at", now);
   }
@@ -207,6 +221,10 @@ export class LocalSqliteStore {
 
   mindContext(): MindContextRepository {
     return new SqliteMindContextRepository(() => this.database());
+  }
+
+  mobileCommandReceipts(): MobileCommandReceiptRepository {
+    return new SqliteMobileCommandReceiptRepository(() => this.database());
   }
 
   revisions(): RevisionRepository {
@@ -256,6 +274,133 @@ export class LocalSqliteStore {
 
   private setMeta(key: string, value: string): void {
     this.database().query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+
+  private migrateFeedScopedPrimaryKeys(): void {
+    const db = this.database();
+    const migrations = [
+      {
+        table: "cards",
+        index: "idx_cards_feed_status",
+        create: `
+          CREATE TABLE cards (
+            feed_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            ready_for_pass INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (feed_id, id)
+          );
+        `,
+        copy: `
+          INSERT INTO cards (feed_id, id, kind, status, ready_for_pass, created_at, updated_at, payload_json)
+          SELECT feed_id, id, kind, status, ready_for_pass, created_at, updated_at, payload_json
+          FROM cards_legacy;
+        `,
+        recreateIndex: "CREATE INDEX idx_cards_feed_status ON cards (feed_id, status);",
+      },
+      {
+        table: "routine_action_groups",
+        index: "idx_routine_action_groups_feed_status",
+        create: `
+          CREATE TABLE routine_action_groups (
+            feed_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (feed_id, id)
+          );
+        `,
+        copy: `
+          INSERT INTO routine_action_groups (feed_id, id, status, created_at, updated_at, payload_json)
+          SELECT feed_id, id, status, created_at, updated_at, payload_json
+          FROM routine_action_groups_legacy;
+        `,
+        recreateIndex: "CREATE INDEX idx_routine_action_groups_feed_status ON routine_action_groups (feed_id, status);",
+      },
+      {
+        table: "source_runs",
+        index: "idx_source_runs_feed_source",
+        extraIndex: "idx_source_runs_trigger_work",
+        create: `
+          CREATE TABLE source_runs (
+            feed_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            trigger_work_id TEXT,
+            completed_at TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (feed_id, id)
+          );
+        `,
+        copy: `
+          INSERT INTO source_runs (feed_id, id, source_id, trigger_work_id, completed_at, payload_json)
+          SELECT feed_id, id, source_id, trigger_work_id, completed_at, payload_json
+          FROM source_runs_legacy;
+        `,
+        recreateIndex: `
+          CREATE INDEX idx_source_runs_feed_source ON source_runs (feed_id, source_id);
+          CREATE INDEX idx_source_runs_trigger_work ON source_runs (trigger_work_id);
+        `,
+      },
+    ];
+
+    for (const migration of migrations) {
+      const primaryKey = (db.query(`PRAGMA table_info(${migration.table})`).all() as Array<{ name: string; pk: number }>)
+        .filter((column) => column.pk > 0)
+        .sort((left, right) => left.pk - right.pk)
+        .map((column) => column.name);
+      if (primaryKey.join(",") === "feed_id,id") continue;
+      db.transaction(() => {
+        db.exec(`DROP INDEX IF EXISTS ${migration.index};`);
+        if (migration.extraIndex) db.exec(`DROP INDEX IF EXISTS ${migration.extraIndex};`);
+        db.exec(`ALTER TABLE ${migration.table} RENAME TO ${migration.table}_legacy;`);
+        db.exec(migration.create);
+        db.exec(migration.copy);
+        db.exec(`DROP TABLE ${migration.table}_legacy;`);
+        db.exec(migration.recreateIndex);
+      })();
+    }
+  }
+}
+
+class SqliteMobileCommandReceiptRepository implements MobileCommandReceiptRepository {
+  constructor(private readonly database: () => Database) {}
+
+  async init(): Promise<void> {}
+
+  async has(commandId: string): Promise<boolean> {
+    return Boolean(this.database()
+      .query("SELECT 1 AS found FROM mobile_command_receipts WHERE command_id = ?")
+      .get(commandId));
+  }
+
+  async get(commandId: string): Promise<MobileCommandReceipt> {
+    const row = this.database()
+      .query("SELECT payload_json FROM mobile_command_receipts WHERE command_id = ?")
+      .get(commandId) as { payload_json: string } | undefined;
+    if (!row) throw new Error(`Mobile command receipt not found: ${commandId}`);
+    return JSON.parse(row.payload_json) as MobileCommandReceipt;
+  }
+
+  async write(receipt: MobileCommandReceipt): Promise<void> {
+    this.database()
+      .query(`
+        INSERT INTO mobile_command_receipts (command_id, feed_id, card_id, kind, applied_at, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(command_id) DO UPDATE SET
+          feed_id = excluded.feed_id,
+          card_id = excluded.card_id,
+          kind = excluded.kind,
+          applied_at = excluded.applied_at,
+          payload_json = excluded.payload_json
+      `)
+      .run(receipt.commandId, receipt.feedId, receipt.cardId, receipt.kind, receipt.appliedAt, JSON.stringify(receipt));
   }
 }
 
@@ -456,8 +601,7 @@ class SqliteCardRepository implements CardRepository {
       .query(`
         INSERT INTO cards (id, feed_id, kind, status, ready_for_pass, created_at, updated_at, payload_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          feed_id = excluded.feed_id,
+        ON CONFLICT(feed_id, id) DO UPDATE SET
           kind = excluded.kind,
           status = excluded.status,
           ready_for_pass = excluded.ready_for_pass,
@@ -505,8 +649,7 @@ class SqliteRoutineActionGroupRepository implements RoutineActionGroupRepository
       .query(`
         INSERT INTO routine_action_groups (id, feed_id, status, created_at, updated_at, payload_json)
         VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          feed_id = excluded.feed_id,
+        ON CONFLICT(feed_id, id) DO UPDATE SET
           status = excluded.status,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at,
@@ -541,8 +684,7 @@ class SqliteSourceRunRepository implements SourceRunRepository {
       .query(`
         INSERT INTO source_runs (id, feed_id, source_id, trigger_work_id, completed_at, payload_json)
         VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          feed_id = excluded.feed_id,
+        ON CONFLICT(feed_id, id) DO UPDATE SET
           source_id = excluded.source_id,
           trigger_work_id = excluded.trigger_work_id,
           completed_at = excluded.completed_at,

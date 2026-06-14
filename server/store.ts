@@ -43,6 +43,7 @@ import { defaultDictationCapability } from "./monologue";
 import { FileCardRepository, type CardRepository } from "./repositories/cards";
 import { FileFeedEventRepository, type FeedEventRepository } from "./repositories/feedEvents";
 import { FileMindContextRepository, type MindContextRepository } from "./repositories/mindContext";
+import { FileMobileCommandReceiptRepository, type MobileCommandReceiptRepository } from "./repositories/mobileCommandReceipts";
 import { FileRevisionRepository, type RevisionRepository } from "./repositories/revisions";
 import { FileRoutineActionGroupRepository, type RoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import { FileSourceRunRepository, type SourceRunRepository } from "./repositories/sourceRuns";
@@ -51,6 +52,7 @@ import { FileSweepRepository, type SweepRepository } from "./repositories/sweeps
 import { FileTextDocumentRepository, type TextDocumentRepository, type TextDocumentSeed } from "./repositories/textDocuments";
 import { FileWorkItemRepository, type WorkItemRepository } from "./repositories/workItems";
 import { FileWorkspaceFeedRepository, type WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
+import type { MobileCommandReceipt } from "../shared/mobile";
 
 export const GLOBAL_PROMPT_NAMES = ["judge.md", "compose-card.md", "execute-work.md", "distill-policy.md", "compound.md"] as const;
 export const FEED_PROMPT_NAMES = ["judge.md", "compose-card.md"] as const;
@@ -66,6 +68,7 @@ export class AttentionStore {
   private readonly cards: CardRepository;
   private readonly events: FeedEventRepository;
   private readonly mindContext: MindContextRepository;
+  private readonly mobileCommandReceipts: MobileCommandReceiptRepository;
   private readonly revisions: RevisionRepository;
   private readonly routineActionGroups: RoutineActionGroupRepository;
   private readonly sourceRuns: SourceRunRepository;
@@ -75,11 +78,12 @@ export class AttentionStore {
   private readonly workItems: WorkItemRepository;
   private readonly workspaceFeeds: WorkspaceFeedRepository;
 
-  constructor(dataDir: string, options: { cards?: CardRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceFeeds?: WorkspaceFeedRepository } = {}) {
+  constructor(dataDir: string, options: { cards?: CardRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; mobileCommandReceipts?: MobileCommandReceiptRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceFeeds?: WorkspaceFeedRepository } = {}) {
     this.dataDir = dataDir;
     this.cards = options.cards ?? new FileCardRepository(this.dataDir);
     this.events = options.events ?? new FileFeedEventRepository(this.dataDir);
     this.mindContext = options.mindContext ?? new FileMindContextRepository(this.dataDir);
+    this.mobileCommandReceipts = options.mobileCommandReceipts ?? new FileMobileCommandReceiptRepository(this.dataDir);
     this.revisions = options.revisions ?? new FileRevisionRepository(this.dataDir);
     this.routineActionGroups = options.routineActionGroups ?? new FileRoutineActionGroupRepository(this.dataDir);
     this.sourceRuns = options.sourceRuns ?? new FileSourceRunRepository(this.dataDir);
@@ -101,6 +105,7 @@ export class AttentionStore {
     await this.cards.init(feedIds);
     await this.events.init(feedIds);
     await this.mindContext.init();
+    await this.mobileCommandReceipts.init();
     await this.revisions.init(feedIds);
     await this.routineActionGroups.init(feedIds);
     await this.sourceRuns.init(feedIds);
@@ -140,6 +145,18 @@ export class AttentionStore {
     return this.workspaceFeeds.listFeedIds();
   }
 
+  async setFeedOrder(feedIds: string[]): Promise<void> {
+    const current = await this.workspaceFeeds.listFeedIds();
+    if (
+      feedIds.length !== current.length
+      || new Set(feedIds).size !== feedIds.length
+      || current.some((feedId) => !feedIds.includes(feedId))
+    ) {
+      throw new Error("Feed order must contain every active feed exactly once.");
+    }
+    await this.workspaceFeeds.setFeedIds(feedIds);
+  }
+
   async readDictationCapability(): Promise<DictationCapability> {
     return readJson<DictationCapability>(this.path("integrations/dictation.json"));
   }
@@ -166,6 +183,18 @@ export class AttentionStore {
 
   async writeMindContextUpdate(update: MindContextUpdate): Promise<void> {
     await this.mindContext.writeUpdate(update);
+  }
+
+  async hasMobileCommandReceipt(commandId: string): Promise<boolean> {
+    return this.mobileCommandReceipts.has(commandId);
+  }
+
+  async readMobileCommandReceipt(commandId: string): Promise<MobileCommandReceipt> {
+    return this.mobileCommandReceipts.get(commandId);
+  }
+
+  async writeMobileCommandReceipt(receipt: MobileCommandReceipt): Promise<void> {
+    await this.mobileCommandReceipts.write(receipt);
   }
 
   async removeMindContextUpdate(updateId: string): Promise<void> {

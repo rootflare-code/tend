@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,10 @@ import { AttentionStore } from "../server/store";
 import type { MindContextPublicationInput } from "../shared/types";
 
 const roots: string[] = [];
+
+beforeEach(() => {
+  setSystemTime(new Date("2026-06-13T17:00:00.000Z"));
+});
 
 async function setup() {
   const root = await mkdtemp(path.join(os.tmpdir(), "attention-mind-test-"));
@@ -52,6 +56,7 @@ function freshPublication(overrides: Partial<MindContextPublicationInput> = {}):
 }
 
 afterEach(async () => {
+  setSystemTime();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 

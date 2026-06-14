@@ -5,7 +5,7 @@ export function queuedWork(
   feedId: string,
   cardId: string,
   instruction: string,
-  extra: Pick<WorkItem, "kind"> & Partial<Pick<WorkItem, "target" | "intent" | "feedbackId" | "startingBatchId" | "previousSweepState" | "approvalDigest" | "cardActionId" | "routineActionGroupId">>,
+  extra: Pick<WorkItem, "kind"> & Partial<Pick<WorkItem, "target" | "intent" | "feedbackId" | "startingBatchId" | "previousSweepState" | "approvalDigest" | "cardActionId" | "routineActionGroupId" | "sourceMobileCommandId">>,
 ): WorkItem {
   const now = isoNow();
   return {

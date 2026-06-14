@@ -10,6 +10,9 @@ flowchart LR
   CLI --> Domain["Domain invariants"]
   UI["React UI"] --> API["Hono HTTP API"]
   API --> Domain
+  Phone["SwiftUI iPhone app"] --> Cloud["Private Supabase mirror"]
+  Cloud --> Worker["Canonical mobile sync worker"]
+  Worker --> Domain
   Domain --> SQLite["SQLite authority"]
   SQLite --> Mirrors["Readable file mirrors"]
   Domain --> SSE["/api/events"]
@@ -69,3 +72,18 @@ mutation commits
 ```
 
 No patch stream is required for v0.
+
+## Native Mobile Bridge
+
+The iPhone app is a review client, not a second Tend runtime. One worker inside the canonical
+`tend-live` process discovers all active feeds, builds privacy-filtered projections, and replaces the
+user's Supabase snapshot in one database transaction. The phone reads those projections and submits
+commands through authenticated RPCs.
+
+Each command includes the feed id, feed lifecycle/pass generation, card digest, and action or work
+digest where applicable. Supabase rejects obviously stale submissions before enqueueing them; the
+local domain validates the same snapshot again before changing SQLite. Durable local command
+receipts make retries idempotent after network or worker failures.
+
+Supabase is disposable transport. It does not own passes, cards, approvals, work status, or connector
+access. Deleting and rebuilding the cloud mirror cannot change the canonical local workflow state.

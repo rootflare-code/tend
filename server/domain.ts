@@ -29,6 +29,7 @@ import type {
   WorkItem,
   WorkspaceRevision,
 } from "../shared/types";
+import type { MobileActionProjection, MobileCommand, MobileCommandResult, MobileCommandReceipt } from "../shared/mobile";
 import { containsFullEmail } from "../shared/emailThread";
 import { AttentionStore, FEED_PROMPT_NAMES } from "./store";
 import { demoCards, feedConfig } from "./templates";
@@ -36,6 +37,7 @@ import { detectMonologue } from "./monologue";
 import { digest, isoNow, makeId, makeToken, slugify } from "./util";
 import { actionDigest, cleanupDigest, configuredApprovalAction, requiredSourceMailbox, routineActionDigest, verifySourceMailbox } from "./workflow/approvals";
 import { queuedWork } from "./workflow/workItems";
+import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction } from "./mobile/projection";
 
 function appendHistory(card: Card, type: string, detail?: string): void {
   card.history.push({ at: isoNow(), type, detail });
@@ -50,6 +52,7 @@ const INBOX_DEMO_REPLAY_SOURCE_IDS: Record<string, string> = {
   "demo-inbox-routine-cleanup": "gmail-thread-19e7434a384dfe39",
   "demo-inbox-intro": "gmail-thread-19e85140ab834ad2",
 };
+const MOBILE_COMMAND_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function sourceRecipeFromBrief(brief: string): { recipe: SourceRecipe; markdown: string } {
   const normalizedBrief = brief.replace(/\\n/g, "\n").trim();
@@ -532,6 +535,37 @@ function normalizeContextUse(contextUse: SourceRunContextUse, update: MindContex
     };
   }
   return { updateId: update.id, mode: "lens", signalIds };
+}
+
+function requireMobileAction(
+  actions: MobileActionProjection[],
+  actionId: string,
+  expectedDigest?: string,
+): MobileActionProjection {
+  const action = actions.find((item) => item.id === actionId);
+  if (!action) throw new Error("Mobile command stale - the selected action is no longer available.");
+  if (!expectedDigest || action.digest !== expectedDigest) {
+    throw new Error("Mobile command stale - the selected action changed after it was reviewed.");
+  }
+  return action;
+}
+
+function verifyMobileRiskConfirmation(
+  expected: MobileActionProjection["confirmation"],
+  actual: MobileCommand["riskConfirmation"],
+): void {
+  if (!expected) {
+    if (actual) throw new Error("Mobile risk confirmation does not match the current action.");
+    return;
+  }
+  if (!actual || actual.kind !== expected.kind) {
+    throw new Error("Confirm the current external-recipient risk in the iPhone app.");
+  }
+  const expectedRecipients = [...expected.recipients].sort();
+  const actualRecipients = [...actual.recipients].map((item) => item.toLowerCase()).sort();
+  if (JSON.stringify(expectedRecipients) !== JSON.stringify(actualRecipients)) {
+    throw new Error("Mobile risk confirmation is stale because the recipients changed.");
+  }
 }
 
 export class AttentionDomain {
@@ -1049,19 +1083,173 @@ export class AttentionDomain {
     });
   }
 
+  private async queueInstructionLocked(
+    feedId: string,
+    cardId: string,
+    instruction: string,
+    sourceMobileCommandId?: string,
+  ): Promise<WorkItem> {
+    const card = await this.store.readCard(feedId, cardId);
+    if (card.status === "done") throw new Error("Done cards cannot be queued.");
+    const work = queuedWork(feedId, cardId, instruction, {
+      kind: "instruction",
+      ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
+    });
+    card.status = "queued";
+    appendHistory(card, "user.instruction", instruction.trim());
+    await this.store.writeWork(work);
+    await this.store.writeCard(card);
+    await this.store.appendEvent({
+      feedId,
+      cardId,
+      workId: work.id,
+      type: "work.queued",
+      detail: { instruction: work.instruction, sourceMobileCommandId },
+    });
+    return work;
+  }
+
+  private async approveActionLocked(
+    feedId: string,
+    cardId: string,
+    cardActionId?: string,
+    sourceMobileCommandId?: string,
+    preparedCard?: Card,
+  ): Promise<WorkItem> {
+    const card = preparedCard ?? await this.store.readCard(feedId, cardId);
+    if (card.feedId !== feedId || card.id !== cardId) throw new Error("Approved card does not belong to this feed.");
+    if (card.status === "done") throw new Error("Done cards cannot be approved.");
+    await this.assertCardSourceCurrent(card);
+    const action = configuredApprovalAction(card, cardActionId);
+    requiredSourceMailbox(feedId, card, action);
+    const now = isoNow();
+    const approvalDigest = actionDigest(card, cardActionId);
+    const feed = await this.store.readFeed(feedId);
+    const active = feed.work.filter((work) =>
+      work.cardId === cardId
+      && work.kind === "execute_approved_action"
+      && (work.status === "queued" || work.status === "working")
+    );
+    const existing = active.find((work) => work.approvalDigest === approvalDigest);
+    if (existing) {
+      if (sourceMobileCommandId && !existing.sourceMobileCommandId) {
+        existing.sourceMobileCommandId = sourceMobileCommandId;
+        await this.store.writeWork(existing);
+      }
+      return existing;
+    }
+    if (active.some((work) => work.status === "working")) {
+      throw new Error("An approved action is already in progress for an older snapshot.");
+    }
+    for (const work of active) {
+      work.status = "stale";
+      work.error = "Approval stale - a newer visible action snapshot was approved.";
+      await this.store.writeWork(work);
+      await this.store.appendEvent({
+        feedId,
+        cardId,
+        workId: work.id,
+        type: "action.stale",
+        detail: { reason: work.error },
+      });
+    }
+    const work: WorkItem = {
+      id: makeId("work"),
+      feedId,
+      cardId,
+      kind: "execute_approved_action",
+      instruction: action.instruction,
+      status: "queued",
+      capabilityToken: makeToken(),
+      approvalDigest,
+      ...(cardActionId ? { cardActionId } : {}),
+      ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
+      createdAt: now,
+      updatedAt: now,
+    };
+    card.status = "queued";
+    appendHistory(card, "user.approved_action", approvalDigest);
+    await this.store.writeWork(work);
+    await this.store.writeCard(card);
+    await this.store.appendEvent({
+      feedId,
+      cardId,
+      workId: work.id,
+      type: "action.approved",
+      detail: { approvalDigest, sourceMobileCommandId },
+    });
+    return work;
+  }
+
+  private async dismissCardLocked(
+    feedId: string,
+    cardId: string,
+    sourceMobileCommandId?: string,
+  ): Promise<WorkItem> {
+    const config = await this.store.readConfig(feedId);
+    const card = await this.store.readCard(feedId, cardId);
+    if (card.status === "done") throw new Error("Done cards cannot be cleaned up again.");
+    const now = isoNow();
+    const approvalDigest = cleanupDigest(card, config.defaultCleanup);
+    const feed = await this.store.readFeed(feedId);
+    const active = feed.work.filter((work) =>
+      work.cardId === cardId
+      && work.kind === "default_cleanup"
+      && (work.status === "queued" || work.status === "working")
+    );
+    const existing = active.find((work) => work.approvalDigest === approvalDigest);
+    if (existing) {
+      if (sourceMobileCommandId && !existing.sourceMobileCommandId) {
+        existing.sourceMobileCommandId = sourceMobileCommandId;
+        await this.store.writeWork(existing);
+      }
+      return existing;
+    }
+    if (active.some((work) => work.status === "working")) {
+      throw new Error("A default cleanup is already in progress for an older snapshot.");
+    }
+    for (const work of active) {
+      work.status = "stale";
+      work.error = "Approval stale - a newer visible cleanup snapshot was approved.";
+      await this.store.writeWork(work);
+      await this.store.appendEvent({
+        feedId,
+        cardId,
+        workId: work.id,
+        type: "action.stale",
+        detail: { reason: work.error },
+      });
+    }
+    const work: WorkItem = {
+      id: makeId("work"),
+      feedId,
+      cardId,
+      kind: "default_cleanup",
+      instruction: config.defaultCleanup,
+      status: "queued",
+      capabilityToken: makeToken(),
+      approvalDigest,
+      ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
+      createdAt: now,
+      updatedAt: now,
+    };
+    card.status = "queued";
+    appendHistory(card, "user.default_cleanup_approved", config.defaultCleanup);
+    await this.store.writeWork(work);
+    await this.store.writeCard(card);
+    await this.store.appendEvent({
+      feedId,
+      cardId,
+      workId: work.id,
+      type: "cleanup.queued",
+      detail: { cleanup: config.defaultCleanup, sourceMobileCommandId },
+    });
+    return work;
+  }
+
   async queueInstruction(feedId: string, cardId: string, instruction: string): Promise<WorkItem> {
     if (!instruction.trim()) throw new Error("Instruction is required.");
-    return this.store.serialize(async () => {
-      const card = await this.store.readCard(feedId, cardId);
-      if (card.status === "done") throw new Error("Done cards cannot be queued.");
-      const work = queuedWork(feedId, cardId, instruction, { kind: "instruction" });
-      card.status = "queued";
-      appendHistory(card, "user.instruction", instruction.trim());
-      await this.store.writeWork(work);
-      await this.store.writeCard(card);
-      await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "work.queued", detail: { instruction: work.instruction } });
-      return work;
-    });
+    return this.store.serialize(() => this.queueInstructionLocked(feedId, cardId, instruction));
   }
 
   async queueFeedInstruction(feedId: string, instruction: string): Promise<WorkItem> {
@@ -1075,45 +1263,7 @@ export class AttentionDomain {
   }
 
   async approveAction(feedId: string, cardId: string, cardActionId?: string): Promise<WorkItem> {
-    return this.store.serialize(async () => {
-      const card = await this.store.readCard(feedId, cardId);
-      if (card.status === "done") throw new Error("Done cards cannot be approved.");
-      await this.assertCardSourceCurrent(card);
-      const action = configuredApprovalAction(card, cardActionId);
-      requiredSourceMailbox(feedId, card, action);
-      const now = isoNow();
-      const approvalDigest = actionDigest(card, cardActionId);
-      const feed = await this.store.readFeed(feedId);
-      const active = feed.work.filter((work) => work.cardId === cardId && work.kind === "execute_approved_action" && (work.status === "queued" || work.status === "working"));
-      const existing = active.find((work) => work.approvalDigest === approvalDigest);
-      if (existing) return existing;
-      if (active.some((work) => work.status === "working")) throw new Error("An approved action is already in progress for an older snapshot.");
-      for (const work of active) {
-        work.status = "stale";
-        work.error = "Approval stale - a newer visible action snapshot was approved.";
-        await this.store.writeWork(work);
-        await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "action.stale", detail: { reason: work.error } });
-      }
-      const work: WorkItem = {
-        id: makeId("work"),
-        feedId,
-        cardId,
-        kind: "execute_approved_action",
-        instruction: action.instruction,
-        status: "queued",
-        capabilityToken: makeToken(),
-        approvalDigest,
-        ...(cardActionId ? { cardActionId } : {}),
-        createdAt: now,
-        updatedAt: now,
-      };
-      card.status = "queued";
-      appendHistory(card, "user.approved_action", approvalDigest);
-      await this.store.writeWork(work);
-      await this.store.writeCard(card);
-      await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "action.approved", detail: { approvalDigest } });
-      return work;
-    });
+    return this.store.serialize(() => this.approveActionLocked(feedId, cardId, cardActionId));
   }
 
   async runCardAction(feedId: string, cardId: string, cardActionId: string): Promise<WorkItem> {
@@ -1130,42 +1280,7 @@ export class AttentionDomain {
   }
 
   async dismissCard(feedId: string, cardId: string): Promise<WorkItem> {
-    return this.store.serialize(async () => {
-      const config = await this.store.readConfig(feedId);
-      const card = await this.store.readCard(feedId, cardId);
-      if (card.status === "done") throw new Error("Done cards cannot be cleaned up again.");
-      const now = isoNow();
-      const approvalDigest = cleanupDigest(card, config.defaultCleanup);
-      const feed = await this.store.readFeed(feedId);
-      const active = feed.work.filter((work) => work.cardId === cardId && work.kind === "default_cleanup" && (work.status === "queued" || work.status === "working"));
-      const existing = active.find((work) => work.approvalDigest === approvalDigest);
-      if (existing) return existing;
-      if (active.some((work) => work.status === "working")) throw new Error("A default cleanup is already in progress for an older snapshot.");
-      for (const work of active) {
-        work.status = "stale";
-        work.error = "Approval stale - a newer visible cleanup snapshot was approved.";
-        await this.store.writeWork(work);
-        await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "action.stale", detail: { reason: work.error } });
-      }
-      const work: WorkItem = {
-        id: makeId("work"),
-        feedId,
-        cardId,
-        kind: "default_cleanup",
-        instruction: config.defaultCleanup,
-        status: "queued",
-        capabilityToken: makeToken(),
-        approvalDigest,
-        createdAt: now,
-        updatedAt: now,
-      };
-      card.status = "queued";
-      appendHistory(card, "user.default_cleanup_approved", config.defaultCleanup);
-      await this.store.writeWork(work);
-      await this.store.writeCard(card);
-      await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "cleanup.queued", detail: { cleanup: config.defaultCleanup } });
-      return work;
-    });
+    return this.store.serialize(() => this.dismissCardLocked(feedId, cardId));
   }
 
   async upsertRoutineActionGroup(feedId: string, input: Pick<RoutineActionGroup, "id" | "label" | "summary" | "proposedAction" | "items">): Promise<RoutineActionGroup> {
@@ -1223,32 +1338,56 @@ export class AttentionDomain {
   }
 
   async approveRoutineActionGroup(feedId: string, groupId: string): Promise<WorkItem> {
-    return this.store.serialize(async () => {
-      const group = await this.store.readRoutineActionGroup(feedId, groupId);
-      const approvalDigest = routineActionDigest(group);
-      const feed = await this.store.readFeed(feedId);
-      const active = feed.work.filter((work) => work.kind === "routine_action_batch" && work.routineActionGroupId === groupId && (work.status === "queued" || work.status === "working"));
-      const existing = active.find((work) => work.approvalDigest === approvalDigest);
-      if (existing) return existing;
-      if (group.status !== "proposed") throw new Error("Routine action group is no longer waiting for approval.");
-      if (active.some((work) => work.status === "working")) throw new Error("An older routine action snapshot is already in progress.");
-      for (const work of active) {
-        work.status = "stale";
-        work.error = "Approval stale - a newer routine action snapshot was approved.";
-        await this.store.writeWork(work);
+    return this.store.serialize(() => this.approveRoutineActionGroupLocked(feedId, groupId));
+  }
+
+  private async approveRoutineActionGroupLocked(
+    feedId: string,
+    groupId: string,
+    sourceMobileCommandId?: string,
+  ): Promise<WorkItem> {
+    const group = await this.store.readRoutineActionGroup(feedId, groupId);
+    const approvalDigest = routineActionDigest(group);
+    const feed = await this.store.readFeed(feedId);
+    const active = feed.work.filter((work) =>
+      work.kind === "routine_action_batch"
+      && work.routineActionGroupId === groupId
+      && (work.status === "queued" || work.status === "working")
+    );
+    const existing = active.find((work) => work.approvalDigest === approvalDigest);
+    if (existing) {
+      if (sourceMobileCommandId && !existing.sourceMobileCommandId) {
+        existing.sourceMobileCommandId = sourceMobileCommandId;
+        await this.store.writeWork(existing);
       }
-      const work = queuedWork(feedId, "__routine__", group.proposedAction.instruction, {
-        kind: "routine_action_batch",
-        routineActionGroupId: group.id,
-        approvalDigest,
-      });
-      group.status = "queued";
-      group.workId = work.id;
+      return existing;
+    }
+    if (group.status !== "proposed") throw new Error("Routine action group is no longer waiting for approval.");
+    if (active.some((work) => work.status === "working")) {
+      throw new Error("An older routine action snapshot is already in progress.");
+    }
+    for (const work of active) {
+      work.status = "stale";
+      work.error = "Approval stale - a newer routine action snapshot was approved.";
       await this.store.writeWork(work);
-      await this.store.writeRoutineActionGroup(group);
-      await this.store.appendEvent({ feedId, workId: work.id, type: "routine_action.approved", detail: { groupId: group.id, approvalDigest, items: group.items.length } });
-      return work;
+    }
+    const work = queuedWork(feedId, "__routine__", group.proposedAction.instruction, {
+      kind: "routine_action_batch",
+      routineActionGroupId: group.id,
+      approvalDigest,
+      ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
+    group.status = "queued";
+    group.workId = work.id;
+    await this.store.writeWork(work);
+    await this.store.writeRoutineActionGroup(group);
+    await this.store.appendEvent({
+      feedId,
+      workId: work.id,
+      type: "routine_action.approved",
+      detail: { groupId: group.id, approvalDigest, items: group.items.length, sourceMobileCommandId },
+    });
+    return work;
   }
 
   async undoDismiss(feedId: string, cardId: string): Promise<Card> {
@@ -1330,6 +1469,178 @@ export class AttentionDomain {
       await this.store.writeCard(card);
       await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.instruction_edited" });
       return work;
+    });
+  }
+
+  async applyMobileCommand(command: MobileCommand): Promise<MobileCommandResult> {
+    if (!MOBILE_COMMAND_ID_PATTERN.test(command.id) || !command.feedId.trim() || !command.cardId.trim()) {
+      throw new Error("Mobile command id, feedId, and cardId are required.");
+    }
+    return this.store.serialize(async () => {
+      if (await this.store.hasMobileCommandReceipt(command.id)) {
+        const receipt = await this.store.readMobileCommandReceipt(command.id);
+        if (
+          receipt.feedId !== command.feedId
+          || receipt.cardId !== command.cardId
+          || receipt.kind !== command.kind
+        ) {
+          throw new Error("Mobile command id was already used for different work.");
+        }
+        return { receipt, ...(receipt.workId ? { workId: receipt.workId } : {}) };
+      }
+
+      const projection = command.kind === "approve_routine_action"
+        ? command.routineActionGroupId
+          ? await projectMobileRoutineAction(this.store, command.feedId, command.routineActionGroupId)
+          : null
+        : await projectMobileCard(this.store, command.feedId, command.cardId);
+      if (!projection || projection.feedId !== command.feedId || projection.cardId !== command.cardId) {
+        throw new Error("Mobile command stale - the card is no longer available in this feed.");
+      }
+      if (projection.feedGeneration !== command.feedGeneration) {
+        throw new Error("Mobile command stale - the feed changed or advanced to a newer pass.");
+      }
+      if (projection.cardDigest !== command.expectedCardDigest) {
+        throw new Error("Mobile command stale - the card changed after it was reviewed on iPhone.");
+      }
+
+      let work: WorkItem | undefined;
+      switch (command.kind) {
+        case "instruction": {
+          let instruction = command.instruction?.trim();
+          if (command.actionId) {
+            const action = requireMobileAction(projection.actions, command.actionId, command.expectedActionDigest);
+            if (action.behavior !== "queue_instruction") {
+              throw new Error("Mobile instruction action no longer queues an instruction.");
+            }
+            const card = await this.store.readCard(command.feedId, command.cardId);
+            const configured = card.actions?.find((item) => item.id === command.actionId);
+            instruction = configured?.instruction?.trim();
+          }
+          if (!instruction) throw new Error("Mobile instruction is required.");
+          work = await this.queueInstructionLocked(command.feedId, command.cardId, instruction, command.id);
+          break;
+        }
+        case "archive": {
+          const action = requireMobileAction(projection.actions, command.actionId ?? "default-cleanup", command.expectedActionDigest);
+          if (action.behavior !== "default_cleanup") throw new Error("Mobile archive action is no longer available.");
+          work = await this.dismissCardLocked(command.feedId, command.cardId, command.id);
+          break;
+        }
+        case "approve_action": {
+          if (!command.actionId) throw new Error("Mobile approval needs an action id.");
+          const action = requireMobileAction(projection.actions, command.actionId, command.expectedActionDigest);
+          if (action.behavior !== "approve_action") throw new Error("Mobile approval action is no longer available.");
+          const cardActionId = command.actionId === "proposed-action" ? undefined : command.actionId;
+          const card = structuredClone(await this.store.readCard(command.feedId, command.cardId));
+          const configured = configuredApprovalAction(card, cardActionId);
+          const edits = command.edits ?? {};
+          if (Object.keys(edits).length && !configured.artifactBlockId) {
+            throw new Error("Mobile approval cannot edit an action without an editable artifact.");
+          }
+          for (const [blockId, value] of Object.entries(edits)) {
+            if (blockId !== configured.artifactBlockId) {
+              throw new Error("Mobile approval may edit only the action's exact artifact.");
+            }
+            const block = card.blocks.find((item) => item.id === blockId);
+            if (!block || block.type !== "editable_text" || !block.editable) {
+              throw new Error("Mobile approval artifact is no longer editable.");
+            }
+            block.value = value;
+          }
+          verifyMobileRiskConfirmation(mobileActionConfirmation(card, configured), command.riskConfirmation);
+          work = await this.approveActionLocked(command.feedId, command.cardId, cardActionId, command.id, card);
+          break;
+        }
+        case "approve_routine_action": {
+          if (!command.routineActionGroupId) throw new Error("Mobile routine approval needs a group id.");
+          const action = requireMobileAction(projection.actions, command.actionId ?? "approve-routine-action", command.expectedActionDigest);
+          if (action.behavior !== "approve_action") throw new Error("Mobile routine approval is no longer available.");
+          verifyMobileRiskConfirmation(action.confirmation, command.riskConfirmation);
+          work = await this.approveRoutineActionGroupLocked(command.feedId, command.routineActionGroupId, command.id);
+          break;
+        }
+        case "edit_queued_instruction": {
+          if (!command.targetWorkId || !command.expectedWorkDigest) {
+            throw new Error("Mobile queued-note edit needs a work id and work digest.");
+          }
+          if (projection.activeWork?.id !== command.targetWorkId || projection.activeWork.digest !== command.expectedWorkDigest) {
+            throw new Error("Mobile command stale - queued work changed before the edit arrived.");
+          }
+          const instruction = command.instruction?.trim();
+          if (!instruction) throw new Error("Mobile queued-note edit is required.");
+          const current = await this.store.readWork(command.feedId, command.targetWorkId);
+          if (current.status !== "queued" || (current.kind !== "instruction" && current.kind !== "scoped_instruction")) {
+            throw new Error("Only a queued card note can be edited from iPhone.");
+          }
+          current.instruction = instruction;
+          current.sourceMobileCommandId = current.sourceMobileCommandId ?? command.id;
+          await this.store.writeWork(current);
+          const card = await this.store.readCard(command.feedId, command.cardId);
+          appendHistory(card, "user.edited_queued_instruction", instruction);
+          await this.store.writeCard(card);
+          await this.store.appendEvent({
+            feedId: command.feedId,
+            cardId: command.cardId,
+            workId: current.id,
+            type: "work.instruction_edited",
+            detail: { sourceMobileCommandId: command.id },
+          });
+          work = current;
+          break;
+        }
+        case "return_to_review": {
+          const feed = await this.store.readFeed(command.feedId);
+          const card = await this.store.readCard(command.feedId, command.cardId);
+          if (card.routineActionGroupId) throw new Error("Routine-group cards must be reviewed through their group.");
+          const activeWork = feed.work.filter((item) =>
+            item.cardId === command.cardId
+            && (item.status === "queued" || item.status === "working" || item.status === "approved_blocked")
+          );
+          if (activeWork.some((item) => item.status === "working")) {
+            throw new Error("Codex already started this card; it cannot return to review yet.");
+          }
+          for (const item of activeWork) {
+            item.status = "cancelled";
+            item.error = "Returned to review from iPhone.";
+            item.sourceMobileCommandId = item.sourceMobileCommandId ?? command.id;
+            await this.store.writeWork(item);
+          }
+          card.status = "to_review_updated";
+          card.readyForPass = feed.config.currentPass;
+          card.completedAt = undefined;
+          appendHistory(card, "user.returned_to_review", command.id);
+          await this.store.writeCard(card);
+          await this.store.appendEvent({
+            feedId: command.feedId,
+            cardId: command.cardId,
+            type: "card.returned_to_review",
+            detail: { sourceMobileCommandId: command.id, cancelledWorkIds: activeWork.map((item) => item.id) },
+          });
+          break;
+        }
+        default:
+          throw new Error(`Unsupported mobile command kind: ${String(command.kind)}`);
+      }
+
+      const receipt: MobileCommandReceipt = {
+        commandId: command.id,
+        feedId: command.feedId,
+        cardId: command.cardId,
+        kind: command.kind,
+        state: "applied",
+        appliedAt: isoNow(),
+        ...(work ? { workId: work.id } : {}),
+      };
+      await this.store.writeMobileCommandReceipt(receipt);
+      await this.store.appendEvent({
+        feedId: command.feedId,
+        cardId: command.cardId,
+        ...(work ? { workId: work.id } : {}),
+        type: "mobile.command_applied",
+        detail: { commandId: command.id, kind: command.kind },
+      });
+      return { receipt, ...(work ? { workId: work.id } : {}) };
     });
   }
 

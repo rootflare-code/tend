@@ -8,6 +8,7 @@ LOCK_DIR="$RUNTIME_ROOT/tend-live.lock"
 LOG_FILE="$RUNTIME_ROOT/tend-live.log"
 SERVICE_LABEL="com.every.tend-live"
 SERVICE_TARGET="gui/$(id -u)/$SERVICE_LABEL"
+MOBILE_ENV_FILE="${TEND_MOBILE_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/tend/mobile.env}"
 WEB_PORT=4321
 API_PORT=4333
 WEB_URL="http://127.0.0.1:$WEB_PORT"
@@ -112,6 +113,7 @@ start_live() {
       ATTENTION_HOME="$RUNTIME_ROOT" \
       ATTENTION_WEB_PORT="$WEB_PORT" \
       ATTENTION_API_PORT="$API_PORT" \
+      TEND_MOBILE_ENV_FILE="$MOBILE_ENV_FILE" \
       "$ROOT/bin/tend-live-run"
 
   for _ in {1..80}; do

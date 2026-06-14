@@ -151,6 +151,16 @@ attention backup import ./attention-backup
 
 See [docs/DATA.md](./docs/DATA.md) for the full storage map.
 
+## iPhone App
+
+The optional native iPhone app mirrors every configured feed through a private Supabase project.
+The Mac remains authoritative: the phone reviews cached projections and records commands, while the
+canonical Tend runtime validates and imports those commands through the same domain rules used by
+the web app and CLI.
+
+The SwiftUI project, database migration, and production setup are documented in
+[docs/IOS.md](./docs/IOS.md).
+
 ## CLI Contract
 
 The human-facing CLI is:
@@ -212,6 +222,7 @@ pnpm seed:demo
 - [docs/AGENT_CONTRACT.md](./docs/AGENT_CONTRACT.md): Codex/CLI workflow
 - [docs/DATA.md](./docs/DATA.md): storage, mirrors, backup, and restore
 - [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md): local development commands and CI
+- [docs/IOS.md](./docs/IOS.md): native iPhone app, Supabase bridge, and device setup
 - [docs/RELEASING.md](./docs/RELEASING.md): release lifecycle
 - [RUNBOOK.md](./RUNBOOK.md): feed-thread operator guide
 - [CAPABILITY_MAP.md](./CAPABILITY_MAP.md): user-visible actions mapped to Codex primitives

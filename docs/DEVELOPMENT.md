@@ -58,6 +58,39 @@ Do not duplicate business logic across UI, CLI, and API.
 
 Domain tests live under `test/`. Add coverage for new invariants before exposing new agent tools.
 
+### Native Mobile
+
+Start and validate the local Supabase stack:
+
+```sh
+npx --yes supabase@latest start
+npx --yes supabase@latest db reset --local
+npx --yes supabase@latest test db
+```
+
+Generate the Xcode project and run the `Tend` scheme:
+
+```sh
+brew install xcodegen
+cd ios
+xcodegen generate
+open Tend.xcodeproj
+```
+
+UI tests launch with fixture data and do not require cloud credentials. The gated bridge integration
+test uses a temporary Tend home and local Supabase:
+
+```sh
+TEND_SUPABASE_E2E=1 \
+TEND_TEST_SUPABASE_URL=<local-api-url> \
+TEND_TEST_SUPABASE_ANON_KEY=<local-publishable-key> \
+TEND_TEST_SUPABASE_SERVICE_ROLE_KEY=<local-service-role-key> \
+TEND_TEST_SUPABASE_JWT_SECRET=<local-jwt-secret> \
+bun test test/mobile-supabase-e2e.test.ts
+```
+
+See [`docs/IOS.md`](./IOS.md) for production configuration and physical-device installation.
+
 ## CI
 
 Pull requests run the same core gates expected locally:

@@ -1,0 +1,5 @@
+TEND_SUPABASE_URL =
+TEND_SUPABASE_PUBLISHABLE_KEY =
+TEND_ALLOWED_EMAIL = dan@every.to
+
+#include? "Local.xcconfig"

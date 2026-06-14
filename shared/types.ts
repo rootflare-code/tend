@@ -332,6 +332,7 @@ export interface WorkItem {
   verifiedAt?: string;
   verifiedApprovalDigest?: string;
   verifiedMailbox?: string;
+  sourceMobileCommandId?: string;
 }
 
 export interface FeedEvent {

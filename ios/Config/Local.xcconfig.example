@@ -1,0 +1,5 @@
+// Copy to Local.xcconfig for device builds. The publishable key is safe in the app;
+// never put the Supabase secret/service key here.
+TEND_SUPABASE_URL = https:/$()/YOUR_PROJECT.supabase.co
+TEND_SUPABASE_PUBLISHABLE_KEY = YOUR_PUBLISHABLE_KEY
+TEND_ALLOWED_EMAIL = dan@every.to

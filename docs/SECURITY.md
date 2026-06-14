@@ -23,6 +23,19 @@ The built-in filter removes common secrets, email addresses, long account number
 paths. It is defense in depth, not a substitute for source restraint: publishers must include only
 short windows that support a published signal.
 
+## iPhone And Supabase
+
+- SQLite on the Mac remains authoritative; Supabase is a disposable private projection and command
+  mailbox.
+- The iPhone receives no connector credentials, capability tokens, Codex thread ownership, or local
+  artifact paths.
+- The phone uses only a Supabase publishable key plus a Keychain-backed user session. The Supabase
+  secret/service key stays on the Mac in a mode `400` or `600` owner-only config file.
+- Row-level security limits every read and command RPC to `auth.uid()`.
+- Commands carry feed, card, action, and work digests and are revalidated locally before mutation.
+- Cached snapshots and drafts use complete file protection and are deleted on sign-out.
+- On Your Mind reaches the phone only after the existing Chronicle privacy filter has run.
+
 ## Reporting
 
 For vulnerabilities, open a private report through the repository's security advisory flow if available. If not, contact the maintainers before publishing details.

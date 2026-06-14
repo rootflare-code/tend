@@ -1,0 +1,160 @@
+import XCTest
+@testable import Tend
+
+final class MobileModelTests: XCTestCase {
+    func testCardIdentityIncludesFeed() {
+        let inbox = FixtureData.cards.first { $0.feedId == "inbox" }!
+        let company = MobileCard(
+            key: "company-attention:\(inbox.cardId)",
+            itemKind: inbox.itemKind,
+            feedId: "company-attention",
+            cardId: inbox.cardId,
+            routineActionGroupId: inbox.routineActionGroupId,
+            feedGeneration: inbox.feedGeneration,
+            cardDigest: inbox.cardDigest,
+            status: inbox.status,
+            reviewPosition: inbox.reviewPosition,
+            reviewable: inbox.reviewable,
+            title: inbox.title,
+            eyebrow: inbox.eyebrow,
+            why: inbox.why,
+            sourceMailbox: inbox.sourceMailbox,
+            contextInfluence: inbox.contextInfluence,
+            blocks: inbox.blocks,
+            actions: inbox.actions,
+            activeWork: inbox.activeWork,
+            createdAt: inbox.createdAt,
+            updatedAt: inbox.updatedAt,
+            completedAt: inbox.completedAt
+        )
+
+        XCTAssertNotEqual(inbox.id, company.id)
+        XCTAssertEqual(inbox.cardId, company.cardId)
+    }
+
+    func testDefaultArchiveRemainsVisibleAlongsideCustomActions() {
+        let card = FixtureData.cards.first { $0.cardId == "cursor-reply" }!
+
+        XCTAssertEqual(card.archiveAction?.label, "Archive")
+        XCTAssertEqual(card.primaryAction?.label, "Send reply")
+    }
+
+    func testActivityStatesExplainOfflineAndStaleWork() {
+        var pending = FixtureData.activities[0]
+        pending.state = "pending"
+        XCTAssertEqual(pending.displayState, "Waiting for Mac")
+
+        var rejected = FixtureData.activities[0]
+        rejected.state = "rejected"
+        XCTAssertEqual(rejected.displayState, "Needs review")
+    }
+
+    func testFixtureContainsEveryCoreMobileSurface() {
+        let snapshot = FixtureData.snapshot
+
+        XCTAssertTrue(["inbox", "company-attention", "every"].allSatisfy { id in
+            snapshot.feeds.contains { $0.id == id }
+        })
+        XCTAssertNotNil(snapshot.cards.first { $0.contextInfluence != nil })
+        XCTAssertNotNil(snapshot.cards.first { !$0.editableBlocks.isEmpty })
+        XCTAssertNotNil(snapshot.cards.first { card in card.blocks.contains { $0.chart != nil } })
+        XCTAssertFalse(snapshot.mind.current?.observations.isEmpty ?? true)
+    }
+
+    @MainActor
+    func testApprovalIncludesOnlyTheActionsExactArtifact() async throws {
+        var card = FixtureData.cards.first { $0.cardId == "cursor-reply" }!
+        card.blocks.append(
+            MobileBlock(
+                id: "unrelated-note",
+                type: "editable_text",
+                label: "Unrelated",
+                title: nil,
+                text: nil,
+                value: "Do not submit this.",
+                items: nil,
+                before: nil,
+                after: nil,
+                editable: true,
+                profile: nil,
+                video: nil,
+                chart: nil
+            )
+        )
+        let action = try XCTUnwrap(card.actions.first { $0.artifactBlockId != nil })
+        let repository = CapturingRepository()
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let model = TendAppModel(
+            repository: repository,
+            cache: MobileCache(directory: cacheDirectory),
+            allowedEmail: "dan@every.to"
+        )
+
+        let succeeded = await model.submit(
+            action: action,
+            for: card,
+            edits: [
+                action.artifactBlockId!: "Approved exact draft.",
+                "unrelated-note": "This must stay local.",
+            ]
+        )
+        let submission = await repository.lastSubmission
+
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(submission?.edits, [action.artifactBlockId!: "Approved exact draft."])
+        try? FileManager.default.removeItem(at: cacheDirectory)
+    }
+
+    @MainActor
+    func testExpiredArchiveUndoDoesNotRestoreTheCardLocally() async throws {
+        let card = try XCTUnwrap(FixtureData.cards.first { $0.cardId == "cursor-reply" })
+        let activity = FixtureData.activities[0]
+        let repository = CapturingRepository()
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let model = TendAppModel(
+            repository: repository,
+            cache: MobileCache(directory: cacheDirectory),
+            allowedEmail: "dan@every.to"
+        )
+        var handled = card
+        handled.reviewable = false
+        handled.status = "queued"
+        model.snapshot = MobileSnapshot(
+            feeds: FixtureData.feeds,
+            cards: [handled],
+            mind: FixtureData.mind,
+            activities: [activity],
+            sync: FixtureData.snapshot.sync
+        )
+        model.pendingUndo = TendAppModel.UndoArchive(id: activity.id, card: card, activity: activity)
+
+        await model.undoArchive()
+
+        XCTAssertNil(model.pendingUndo)
+        XCTAssertFalse(try XCTUnwrap(model.snapshot.cards.first).reviewable)
+        XCTAssertTrue(model.errorMessage?.contains("left the undo window") == true)
+        try? FileManager.default.removeItem(at: cacheDirectory)
+    }
+}
+
+private actor CapturingRepository: TendRepository {
+    nonisolated let usesFixtures = true
+    private(set) var lastSubmission: MobileCommandSubmission?
+
+    func hasSession() async -> Bool { true }
+    func requestEmailCode(email: String) async throws {}
+    func verifyEmailCode(email: String, code: String) async throws {}
+    func signOut() async throws {}
+    func loadSnapshot() async throws -> MobileSnapshot { FixtureData.snapshot }
+
+    func submit(_ command: MobileCommandSubmission) async throws -> MobileActivity {
+        lastSubmission = command
+        return FixtureData.activities[0]
+    }
+
+    func cancel(commandID: UUID) async throws -> MobileActivity? { nil }
+    func startObserving(_ onChange: @escaping @Sendable () async -> Void) async throws {}
+    func stopObserving() async {}
+}

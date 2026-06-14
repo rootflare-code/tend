@@ -1,6 +1,7 @@
 import type { AttentionDomain } from "../domain";
 import type { LocalSqliteStore } from "../sqlite";
 import type { AttentionStore } from "../store";
+import type { MobileSyncStatus } from "../../shared/mobile";
 
 export type Notify = (data: unknown) => void;
 
@@ -13,6 +14,7 @@ export type LocalRouteContext = {
   root: string;
   sqlite: LocalSqliteStore;
   store: AttentionStore;
+  mobileStatus?: () => MobileSyncStatus;
 };
 
 export async function body(c: any): Promise<Record<string, unknown>> {
