@@ -850,7 +850,6 @@ export class AttentionDomain {
     if (!instruction.trim()) throw new Error("Instruction is required.");
     const target = await this.store.validateVoiceTarget(requested);
     return this.store.serialize(async () => {
-      await this.store.appendEvent({ feedId: anchorFeedId, type: "voice.instruction_submitted", detail: { target, instruction: instruction.trim() } });
       if (target.kind === "sweep") {
         const feed = await this.store.readFeed(target.feedId);
         const visibleCardIds = feed.cards
@@ -889,6 +888,7 @@ export class AttentionDomain {
         });
         await this.store.appendEvent({ feedId: target.feedId, workId: work.id, type: "sweep.feedback_recorded", detail: { feedbackId: trace.id, batchId: trace.batchId, instruction: trace.instruction } });
         await this.store.appendEvent({ feedId: target.feedId, workId: work.id, type: "voice.intent_queued", detail: { target, intent: work.intent } });
+        await this.store.appendEvent({ feedId: anchorFeedId, workId: work.id, type: "voice.instruction_submitted", detail: { target, instruction: instruction.trim() } });
         return { kind: "scoped_work" as const, target, work, trace };
       }
 
@@ -904,6 +904,7 @@ export class AttentionDomain {
       }
       await this.store.writeWork(work);
       await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "voice.intent_queued", detail: { target, intent: work.intent } });
+      await this.store.appendEvent({ feedId: anchorFeedId, cardId: target.kind === "card" ? target.cardId : undefined, workId: work.id, type: "voice.instruction_submitted", detail: { target, instruction: instruction.trim() } });
       return { kind: "scoped_work" as const, target, work };
     });
   }

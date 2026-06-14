@@ -105,6 +105,23 @@ describe("runtime resolution", () => {
 
       expect((await runtime.store.readCard("inbox", "shared-card")).title).toBe("Inbox card");
       expect((await runtime.store.readCard("every", "shared-card")).title).toBe("Every card");
+
+      const feedback = await domain.submitVoiceInstruction(
+        "inbox",
+        { kind: "card", feedId: "inbox", cardId: "shared-card" },
+        "This migrated card still accepts feedback.",
+      );
+      expect(feedback.work.status).toBe("queued");
+      expect((await runtime.store.readCard("inbox", "shared-card")).history).toEqual([
+        expect.objectContaining({
+          type: "user.scoped_instruction",
+          detail: "This migrated card still accepts feedback.",
+        }),
+      ]);
+      expect((await runtime.store.readEvents("inbox")).filter((event) => event.workId === feedback.work.id).map((event) => event.type)).toEqual([
+        "voice.intent_queued",
+        "voice.instruction_submitted",
+      ]);
     } finally {
       runtime.sqlite.close();
       await rm(root, { recursive: true, force: true });

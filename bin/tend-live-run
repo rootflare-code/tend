@@ -14,7 +14,7 @@ load_mobile_env() {
   local key
   local value
 
-  [[ -f "$env_file" ]] || return
+  [[ -f "$env_file" ]] || return 0
   mode="$(stat -f '%Lp' "$env_file" 2>/dev/null || stat -c '%a' "$env_file" 2>/dev/null || true)"
   if [[ "$mode" != "400" && "$mode" != "600" ]]; then
     echo "Refusing Tend mobile config with permissions $mode; expected 400 or 600: $env_file"

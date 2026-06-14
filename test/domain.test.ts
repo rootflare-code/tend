@@ -5,7 +5,7 @@ import path from "node:path";
 import { AttentionDomain } from "../server/domain";
 import { drainPrompt } from "../server/dispatcher";
 import { formatWorkClaimOutput, formatWorkListOutput } from "../server/operator";
-import { FileCardRepository, MirroredCardRepository } from "../server/repositories/cards";
+import { FileCardRepository, MirroredCardRepository, type CardRepository } from "../server/repositories/cards";
 import { FileFeedEventRepository, MirroredFeedEventRepository } from "../server/repositories/feedEvents";
 import { FileRevisionRepository, MirroredRevisionRepository } from "../server/repositories/revisions";
 import { FileRoutineActionGroupRepository, MirroredRoutineActionGroupRepository } from "../server/repositories/routineActionGroups";
@@ -21,6 +21,37 @@ import type { Card, WorkItem } from "../shared/types";
 import { closestTarget, preferredTarget } from "../src/state/voiceTarget";
 
 const roots: string[] = [];
+
+class FailingCardRepository implements CardRepository {
+  failWrites = false;
+
+  constructor(private readonly delegate: CardRepository) {}
+
+  init(feedIds: string[]): Promise<void> {
+    return this.delegate.init(feedIds);
+  }
+
+  list(feedId: string): Promise<Card[]> {
+    return this.delegate.list(feedId);
+  }
+
+  get(feedId: string, cardId: string): Promise<Card> {
+    return this.delegate.get(feedId, cardId);
+  }
+
+  has(feedId: string, cardId: string): Promise<boolean> {
+    return this.delegate.has(feedId, cardId);
+  }
+
+  write(card: Card): Promise<void> {
+    if (this.failWrites) return Promise.reject(new Error("simulated migrated card upsert failure"));
+    return this.delegate.write(card);
+  }
+
+  remove(feedId: string, cardId: string): Promise<void> {
+    return this.delegate.remove(feedId, cardId);
+  }
+}
 
 async function setup() {
   const root = await mkdtemp(path.join(os.tmpdir(), "attention-test-"));
@@ -1405,6 +1436,28 @@ describe("scoped persistent voice dock routing", () => {
     expect(result.work.target).toEqual({ kind: "card", feedId: "inbox", cardId: "inbox-ready-to-collect" });
     expect((await store.readCard("inbox", "inbox-ready-to-collect")).status).toBe("queued");
     expect((await store.readEvents("inbox")).map((event) => event.type)).toContain("voice.instruction_submitted");
+  });
+
+  test("does not record submitted feedback when the card and work mutation cannot commit", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "attention-test-"));
+    roots.push(root);
+    const cards = new FailingCardRepository(new FileCardRepository(root));
+    const store = new AttentionStore(root, { cards });
+    await store.init();
+    const domain = new AttentionDomain(store);
+    const before = await store.readCard("inbox", "inbox-ready-to-collect");
+    const beforeEvents = await store.readEvents("inbox");
+
+    cards.failWrites = true;
+    await expect(domain.submitVoiceInstruction(
+      "inbox",
+      { kind: "card", feedId: "inbox", cardId: "inbox-ready-to-collect" },
+      "This feedback must not be recorded without queued work.",
+    )).rejects.toThrow("simulated migrated card upsert failure");
+
+    expect(await store.readCard("inbox", "inbox-ready-to-collect")).toEqual(before);
+    expect((await store.readFeed("inbox")).work).toHaveLength(0);
+    expect(await store.readEvents("inbox")).toEqual(beforeEvents);
   });
 
   test("queues sweep feedback for Codex and only changes cards after an explicit rejudgment write-back", async () => {
