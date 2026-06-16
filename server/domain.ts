@@ -18,6 +18,7 @@ import type {
   MindContextUpdate,
   MindContextWorkspace,
   PolicyRevision,
+  PostActionCompletion,
   ProposedAction,
   RevisionProposal,
   RoutineActionGroup,
@@ -1131,7 +1132,10 @@ export class AttentionDomain {
       && work.kind === "execute_approved_action"
       && (work.status === "queued" || work.status === "working")
     );
-    const existing = active.find((work) => work.approvalDigest === approvalDigest);
+    const existing = active.find((work) =>
+      work.approvalDigest === approvalDigest
+      && work.completionCleanup === feed.config.defaultCleanup
+    );
     if (existing) {
       if (sourceMobileCommandId && !existing.sourceMobileCommandId) {
         existing.sourceMobileCommandId = sourceMobileCommandId;
@@ -1163,6 +1167,7 @@ export class AttentionDomain {
       status: "queued",
       capabilityToken: makeToken(),
       approvalDigest,
+      completionCleanup: feed.config.defaultCleanup,
       ...(cardActionId ? { cardActionId } : {}),
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
       createdAt: now,
@@ -1192,8 +1197,11 @@ export class AttentionDomain {
     const feed = await this.store.readFeed(feedId);
     const completedCleanup = feed.work.some((work) =>
       work.cardId === cardId
-      && work.kind === "default_cleanup"
       && work.status === "completed"
+      && (
+        work.kind === "default_cleanup"
+        || (work.kind === "execute_approved_action" && work.postAction?.cleanup.status === "completed")
+      )
     );
     if (card.status === "done" && completedCleanup) throw new Error("This card's default cleanup is already complete.");
     const now = isoNow();
@@ -1754,7 +1762,7 @@ export class AttentionDomain {
     });
   }
 
-  async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; actions?: CardAction[]; done?: boolean }): Promise<WorkItem> {
+  async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; actions?: CardAction[]; done?: boolean; postAction?: PostActionCompletion }): Promise<WorkItem> {
     if (result.blocks) validateCardBlocks(result.blocks);
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
@@ -1835,12 +1843,43 @@ export class AttentionDomain {
           if (sourceMailbox && work.verifiedMailbox !== sourceMailbox) {
             throw new Error(`Approved email reply must be reverified for ${sourceMailbox} before completion.`);
           }
+          if (work.completionCleanup) {
+            const config = await this.store.readConfig(feedId);
+            if (work.completionCleanup !== config.defaultCleanup) {
+              throw new Error("Approval stale - the configured completion cleanup changed after approval.");
+            }
+            this.validatePostActionCompletion(result.postAction);
+          }
         }
         if (result.blocks) card.blocks = result.blocks;
         if (result.proposedAction) card.proposedAction = result.proposedAction;
         if (result.actions) card.actions = result.actions;
+        if (
+          work.kind === "execute_approved_action"
+          && work.completionCleanup
+          && result.postAction?.cleanup.status === "blocked"
+        ) {
+          work.status = "approved_blocked";
+          work.response = result.response.trim();
+          work.postAction = result.postAction;
+          work.error = result.postAction.cleanup.detail.trim();
+          card.status = "approved_blocked";
+          appendHistory(card, "codex.post_action_cleanup_blocked", work.error);
+          await this.store.writeWork(work);
+          await this.store.writeCard(card);
+          await this.store.appendEvent({
+            feedId,
+            cardId: work.cardId,
+            workId,
+            type: "work.post_action_cleanup_blocked",
+            detail: { response: work.response, postAction: result.postAction },
+          });
+          return work;
+        }
         const config = await this.store.readConfig(feedId);
-        const done = Boolean(result.done || work.kind === "default_cleanup");
+        const done = work.kind === "execute_approved_action" && work.completionCleanup
+          ? result.postAction!.disposition === "done"
+          : Boolean(result.done || work.kind === "default_cleanup");
         card.status = done ? "done" : "to_review_updated";
         card.completedAt = done ? isoNow() : undefined;
         card.readyForPass = work.kind === "execute_approved_action" && !done
@@ -1852,19 +1891,20 @@ export class AttentionDomain {
       work.status = "completed";
       work.completedAt = isoNow();
       work.response = result.response.trim();
+      work.postAction = result.postAction;
       await this.store.writeWork(work);
-      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.completed", detail: { response: work.response } });
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.completed", detail: { response: work.response, postAction: result.postAction } });
       return work;
     });
   }
 
-  async verifyApprovedAction(feedId: string, workId: string, token: string, authenticatedMailbox?: string): Promise<{ approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string }> {
+  async verifyApprovedAction(feedId: string, workId: string, token: string, authenticatedMailbox?: string): Promise<{ approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string; completionCleanup?: string }> {
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Approved action work must be claimed before verification.");
       if ((work.kind !== "execute_approved_action" && work.kind !== "default_cleanup" && work.kind !== "routine_action_batch") || !work.approvalDigest) throw new Error("Work item is not an approved action.");
       if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
-      let result: { approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string };
+      let result: { approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string; completionCleanup?: string };
       if (work.kind === "routine_action_batch") {
         if (!work.routineActionGroupId) throw new Error("Routine action work is missing its group.");
         const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
@@ -1882,12 +1922,16 @@ export class AttentionDomain {
         } else {
           const action = configuredApprovalAction(card, work.cardActionId);
           if (work.approvalDigest !== actionDigest(card, work.cardActionId)) throw new Error("Approval stale - reread and return the card for review.");
+          if (work.completionCleanup && work.completionCleanup !== (await this.store.readConfig(feedId)).defaultCleanup) {
+            throw new Error("Approval stale - the configured completion cleanup changed after approval.");
+          }
           const verifiedMailbox = verifySourceMailbox(feedId, card, action, authenticatedMailbox);
           result = {
             approvalDigest: work.approvalDigest,
             action,
             artifact: action.artifactBlockId ? card.blocks.find((block) => block.id === action.artifactBlockId) : undefined,
             ...(verifiedMailbox ? { verifiedMailbox } : {}),
+            ...(work.completionCleanup ? { completionCleanup: work.completionCleanup } : {}),
           };
         }
       }
@@ -1969,7 +2013,7 @@ export class AttentionDomain {
     });
   }
 
-  async reconcileApprovedWork(feedId: string, workId: string, token: string, result: { response: string; done?: boolean }): Promise<WorkItem> {
+  async reconcileApprovedWork(feedId: string, workId: string, token: string, result: { response: string; done?: boolean; postAction?: PostActionCompletion }): Promise<WorkItem> {
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "approved_blocked" || work.kind !== "execute_approved_action" || !work.approvalDigest) {
@@ -1983,20 +2027,43 @@ export class AttentionDomain {
       const completedAt = isoNow();
       const card = await this.store.readCard(feedId, work.cardId);
       const config = await this.store.readConfig(feedId);
-      card.status = result.done ? "done" : "to_review_updated";
-      card.completedAt = result.done ? completedAt : undefined;
-      card.readyForPass = result.done ? config.currentPass + 1 : config.currentPass;
+      if (work.completionCleanup) {
+        if (work.completionCleanup !== config.defaultCleanup) {
+          throw new Error("Approval stale - the configured completion cleanup changed after approval.");
+        }
+        this.validatePostActionCompletion(result.postAction, false);
+      }
+      const done = work.completionCleanup ? result.postAction!.disposition === "done" : Boolean(result.done);
+      card.status = done ? "done" : "to_review_updated";
+      card.completedAt = done ? completedAt : undefined;
+      card.readyForPass = done ? config.currentPass + 1 : config.currentPass;
       appendHistory(card, "codex.approved_action_reconciled", result.response.trim());
       work.status = "completed";
       work.completedAt = completedAt;
       work.updatedAt = completedAt;
       work.response = result.response.trim();
+      work.postAction = result.postAction;
       work.error = undefined;
       await this.store.writeWork(work);
       await this.store.writeCard(card);
-      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.approved_action_reconciled", detail: { response: work.response } });
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.approved_action_reconciled", detail: { response: work.response, postAction: result.postAction } });
       return work;
     });
+  }
+
+  private validatePostActionCompletion(postAction: PostActionCompletion | undefined, allowBlocked = true): asserts postAction is PostActionCompletion {
+    if (!postAction) throw new Error("Approved action completion must report the bundled cleanup outcome and final disposition.");
+    if (
+      postAction.cleanup.status !== "completed"
+      && postAction.cleanup.status !== "not_required"
+      && (postAction.cleanup.status !== "blocked" || !allowBlocked)
+    ) {
+      throw new Error(`Post-action cleanup status must be completed or not_required${allowBlocked ? " or blocked" : ""}.`);
+    }
+    if (!postAction.cleanup.detail?.trim()) throw new Error("Post-action cleanup needs concrete verification detail.");
+    if (postAction.disposition !== "done" && postAction.disposition !== "review") {
+      throw new Error("Post-action disposition must be done or review.");
+    }
   }
 
   async retryApprovedWork(feedId: string, workId: string): Promise<WorkItem> {
@@ -2004,6 +2071,9 @@ export class AttentionDomain {
       const work = await this.store.readWork(feedId, workId);
       if ((work.status !== "approved_blocked" && work.status !== "failed") || work.kind !== "execute_approved_action" || !work.approvalDigest) {
         throw new Error("Only an approved blocked action can be retried.");
+      }
+      if (work.postAction?.cleanup.status === "blocked") {
+        throw new Error("The main action already succeeded. Retry only the bundled cleanup, then use work:reconcile-approved.");
       }
       const card = await this.store.readCard(feedId, work.cardId);
       requiredSourceMailbox(feedId, card, configuredApprovalAction(card, work.cardActionId));

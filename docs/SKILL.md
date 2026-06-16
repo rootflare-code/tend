@@ -67,8 +67,8 @@ Use this skill when a Codex Desktop thread is connected to a local Attention fee
 
 ```sh
 attention cli action:verify --feed <feed-id> --work <work-id> --token <token>
-attention cli work:complete --feed <feed-id> --work <work-id> --token <token> --result '{"response":"..."}'
+attention cli work:complete --feed <feed-id> --work <work-id> --token <token> --result '{"response":"...","postAction":{"cleanup":{"status":"completed","detail":"Verified no current source rows remain."},"disposition":"done"}}'
 ```
 
-Use `work:fail`, `work:block`, `work:retry`, or `work:cancel` when completion is not appropriate. If an approved action was blocked but the exact connector mutation later succeeded, record that with `work:reconcile-approved --feed <feed-id> --work <work-id> --token <token> --result '{"response":"..."}'` instead of recreating the old card shape.
+When `work:claim` includes `completionCleanup`, the action click authorizes that predictable cleanup too. Perform it in the same workflow and provide the `postAction` receipt; do not require a separate Archive click. If the main action succeeds but cleanup fails, complete with cleanup status `blocked`; Tend preserves the successful action so cleanup can be retried without repeating it. Then use `work:reconcile-approved` with a completed cleanup receipt. Use `work:fail`, `work:block`, `work:retry`, or `work:cancel` when the main action itself does not succeed.
 Run `attention cli help` for the full command surface.

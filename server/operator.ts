@@ -20,6 +20,7 @@ export interface ClaimedWorkOutput extends WorkItem {
     completionPrerequisite?: string;
     visibleCardIds?: string[];
     sourceRunRule?: string;
+    postActionRule?: string;
   };
 }
 
@@ -59,6 +60,7 @@ export interface UserAuthorizationReceipt {
     text?: string;
     items?: CardBlock["items"];
   };
+  completionCleanup?: string;
   riskConfirmation?: {
     kind: "external_recipient";
     recipients: string[];
@@ -137,7 +139,7 @@ function buildAuthorizationReceipt(work: WorkItem, context: WorkClaimContext): U
     const risk = riskConfirmation(context.card, action, artifact);
     return {
       kind: "tend_action_click",
-      statement: `The user clicked "${action.label}" in Tend at ${approvedAt} and authorized this one external mutation for "${context.card.title}".${risk ? ` ${risk.statement}` : ""} This receipt is sufficient final approval; do not ask for a second chat confirmation.`,
+      statement: `The user clicked "${action.label}" in Tend at ${approvedAt} and authorized this one external mutation for "${context.card.title}".${work.completionCleanup ? ` If the action succeeds, this approval also includes the configured completion cleanup: "${work.completionCleanup}".` : ""}${risk ? ` ${risk.statement}` : ""} This receipt is sufficient final approval; do not ask for a second chat confirmation.`,
       noSecondChatConfirmationNeeded: true,
       actionLabel: action.label,
       approvedAt,
@@ -146,6 +148,7 @@ function buildAuthorizationReceipt(work: WorkItem, context: WorkClaimContext): U
       card: cardReceipt(context.card),
       ...(context.card.sourceMailbox ? { sourceMailbox: context.card.sourceMailbox } : {}),
       ...(artifact ? { exactApprovedArtifact: artifactReceipt(artifact) } : {}),
+      ...(work.completionCleanup ? { completionCleanup: work.completionCleanup } : {}),
       ...(risk ? { riskConfirmation: risk } : {}),
       invalidatesIf: APPROVAL_INVALIDATIONS,
     };
@@ -221,6 +224,11 @@ export function formatWorkClaimOutput(feedId: string, work: WorkItem | null, con
   const userAuthorization = buildAuthorizationReceipt(work, context);
   if (userAuthorization) {
     operatorGuidance.userAuthorization = userAuthorization;
+  }
+
+  if (work.kind === "execute_approved_action" && work.completionCleanup) {
+    operatorGuidance.completionPrerequisite = `After the approved action succeeds, perform the bundled completion cleanup "${work.completionCleanup}" and verify its authoritative outcome. Do not ask the user to click Archive separately.`;
+    operatorGuidance.postActionRule = 'Complete with `--result \'{"response":"...","postAction":{"cleanup":{"status":"completed","detail":"fresh verification evidence"},"disposition":"done"}}\'`. Use cleanup status `not_required` only when the user asked to preserve the source or the configured cleanup genuinely does not apply. If the main action succeeded but cleanup failed, use status `blocked`; Tend will preserve the successful action and require `work:reconcile-approved` after retrying cleanup, rather than repeating the main action. Use disposition `review` only when a concrete next step remains.';
   }
 
   if (work.intent === "sweep_rejudge") {

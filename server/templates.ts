@@ -63,9 +63,11 @@ external-recipient risk confirmation for those named recipients while the verifi
 matches; do not ask for duplicate chat approval. When drafting or revising an email reply, write as the owner of \`sourceMailbox\` and preserve that sender's voice and signature unless the user's instruction explicitly changes sender. For routine actions, reread
 every authoritative source item before mutating any of them. If any item changed or needs judgment,
 fail the group so its items return to individual review. Record the result, evidence, uncertainty,
-and any proposed policy learning. Completing an approved card action returns the card to review by
-default so required source cleanup or follow-through stays visible. Set \`done: true\` only after all
-required cleanup has been freshly verified and no concrete next step remains.
+and any proposed policy learning. An approved action may include the feed's configured completion
+cleanup in the same authorization receipt. When it does, perform that predictable cleanup after the
+main action succeeds, verify the authoritative result, and report it in \`postAction\`; never ask the
+user to click Archive separately. Use disposition \`done\` when no concrete next step remains, or
+\`review\` when the card still needs attention.
 `;
 
 export const DISTILL_POLICY_PROMPT = `# Distill policy prompt

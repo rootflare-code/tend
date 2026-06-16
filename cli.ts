@@ -155,7 +155,9 @@ try {
       const card = work && !work.cardId.startsWith("__") ? await store.readCard(feedId, work.cardId) : undefined;
       const sweepFeedback = work?.intent === "sweep_rejudge" && work.feedbackId ? await store.readSweepFeedback(feedId, work.feedbackId) : undefined;
       const routineActionGroup = work?.routineActionGroupId ? await store.readRoutineActionGroup(feedId, work.routineActionGroupId) : undefined;
-      const feedConfig = work?.kind === "default_cleanup" ? await store.readConfig(feedId) : undefined;
+      const feedConfig = work?.kind === "default_cleanup" || work?.kind === "execute_approved_action"
+        ? await store.readConfig(feedId)
+        : undefined;
       output = formatWorkClaimOutput(feedId, work, { card, feedConfig, routineActionGroup, sweepFeedback });
     }
     break;

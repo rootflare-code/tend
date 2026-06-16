@@ -28,6 +28,8 @@ additive by default, and document breaking command or response changes in `CHANG
   search and ranking or originate one bounded research question, but it is never evidence,
   authorization, or permission to exceed the feed's configured sources.
 - Follow the `operatorGuidance` returned by `work:claim`; it is part of the command contract.
+- When an approved action receipt includes `completionCleanup`, the same click authorizes that predictable cleanup after the main action succeeds. Perform and verify it before completion; never ask for a separate Archive click.
+- If the main action succeeds but bundled cleanup fails, report cleanup status `blocked`. Retry only cleanup, then use `work:reconcile-approved`; never repeat the already-successful main action.
 
 ## Claim Guidance
 

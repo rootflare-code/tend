@@ -321,6 +321,7 @@ export interface WorkItem {
   status: WorkStatus;
   capabilityToken: string;
   approvalDigest?: string;
+  completionCleanup?: string;
   cardActionId?: string;
   routineActionGroupId?: string;
   createdAt: string;
@@ -328,11 +329,20 @@ export interface WorkItem {
   claimedAt?: string;
   completedAt?: string;
   response?: string;
+  postAction?: PostActionCompletion;
   error?: string;
   verifiedAt?: string;
   verifiedApprovalDigest?: string;
   verifiedMailbox?: string;
   sourceMobileCommandId?: string;
+}
+
+export interface PostActionCompletion {
+  cleanup: {
+    status: "completed" | "not_required" | "blocked";
+    detail: string;
+  };
+  disposition: "done" | "review";
 }
 
 export interface FeedEvent {
