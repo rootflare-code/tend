@@ -1189,10 +1189,15 @@ export class AttentionDomain {
   ): Promise<WorkItem> {
     const config = await this.store.readConfig(feedId);
     const card = await this.store.readCard(feedId, cardId);
-    if (card.status === "done") throw new Error("Done cards cannot be cleaned up again.");
+    const feed = await this.store.readFeed(feedId);
+    const completedCleanup = feed.work.some((work) =>
+      work.cardId === cardId
+      && work.kind === "default_cleanup"
+      && work.status === "completed"
+    );
+    if (card.status === "done" && completedCleanup) throw new Error("This card's default cleanup is already complete.");
     const now = isoNow();
     const approvalDigest = cleanupDigest(card, config.defaultCleanup);
-    const feed = await this.store.readFeed(feedId);
     const active = feed.work.filter((work) =>
       work.cardId === cardId
       && work.kind === "default_cleanup"
@@ -1834,10 +1839,13 @@ export class AttentionDomain {
         if (result.blocks) card.blocks = result.blocks;
         if (result.proposedAction) card.proposedAction = result.proposedAction;
         if (result.actions) card.actions = result.actions;
-        const done = Boolean(result.done || work.kind === "default_cleanup" || work.kind === "execute_approved_action");
+        const config = await this.store.readConfig(feedId);
+        const done = Boolean(result.done || work.kind === "default_cleanup");
         card.status = done ? "done" : "to_review_updated";
         card.completedAt = done ? isoNow() : undefined;
-        card.readyForPass = (await this.store.readConfig(feedId)).currentPass + 1;
+        card.readyForPass = work.kind === "execute_approved_action" && !done
+          ? config.currentPass
+          : config.currentPass + 1;
         appendHistory(card, "codex.completed", result.response.trim());
         await this.store.writeCard(card);
       }
@@ -1961,7 +1969,7 @@ export class AttentionDomain {
     });
   }
 
-  async reconcileApprovedWork(feedId: string, workId: string, token: string, result: { response: string }): Promise<WorkItem> {
+  async reconcileApprovedWork(feedId: string, workId: string, token: string, result: { response: string; done?: boolean }): Promise<WorkItem> {
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "approved_blocked" || work.kind !== "execute_approved_action" || !work.approvalDigest) {
@@ -1974,9 +1982,10 @@ export class AttentionDomain {
       if (!result.response?.trim()) throw new Error("A reconciliation response is required.");
       const completedAt = isoNow();
       const card = await this.store.readCard(feedId, work.cardId);
-      card.status = "done";
-      card.completedAt = completedAt;
-      card.readyForPass = (await this.store.readConfig(feedId)).currentPass + 1;
+      const config = await this.store.readConfig(feedId);
+      card.status = result.done ? "done" : "to_review_updated";
+      card.completedAt = result.done ? completedAt : undefined;
+      card.readyForPass = result.done ? config.currentPass + 1 : config.currentPass;
       appendHistory(card, "codex.approved_action_reconciled", result.response.trim());
       work.status = "completed";
       work.completedAt = completedAt;

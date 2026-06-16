@@ -63,7 +63,9 @@ external-recipient risk confirmation for those named recipients while the verifi
 matches; do not ask for duplicate chat approval. When drafting or revising an email reply, write as the owner of \`sourceMailbox\` and preserve that sender's voice and signature unless the user's instruction explicitly changes sender. For routine actions, reread
 every authoritative source item before mutating any of them. If any item changed or needs judgment,
 fail the group so its items return to individual review. Record the result, evidence, uncertainty,
-and any proposed policy learning.
+and any proposed policy learning. Completing an approved card action returns the card to review by
+default so required source cleanup or follow-through stays visible. Set \`done: true\` only after all
+required cleanup has been freshly verified and no concrete next step remains.
 `;
 
 export const DISTILL_POLICY_PROMPT = `# Distill policy prompt

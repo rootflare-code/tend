@@ -1045,7 +1045,8 @@ describe("approval, learning, and heartbeat safety", () => {
 
     expect(reconciled.status).toBe("completed");
     expect(reconciled.response).toBe("Forward succeeded after connector risk confirmation.");
-    expect(card.status).toBe("done");
+    expect(card.status).toBe("to_review_updated");
+    expect(card.readyForPass).toBe((await store.readConfig("inbox")).currentPass);
     expect(card.history.at(-1)).toMatchObject({ type: "codex.approved_action_reconciled", detail: "Forward succeeded after connector risk confirmation." });
   });
 
@@ -1069,23 +1070,65 @@ describe("approval, learning, and heartbeat safety", () => {
     await expect(domain.reconcileApprovedWork("inbox", approved.id, approved.capabilityToken, { response: "Sent." })).rejects.toThrow("must have passed action:verify");
   });
 
-  test("moves a completed approved action to done without an extra worker flag", async () => {
+  test("keeps completed email actions reviewable until source cleanup succeeds", async () => {
     const { store, domain } = await setup();
     await domain.bindFeed("inbox", "thread-inbox");
     await domain.upsertCard("inbox", {
       id: "approved-and-completed",
-      title: "Archive this handled notice.",
-      why: "The approved action should close the card when it succeeds.",
-      blocks: [{ id: "brief", type: "memo", text: "Already handled." }],
+      title: "Send this reply, then clean up the source.",
+      why: "The send succeeds before policy-required Inbox cleanup.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "draft", type: "editable_text", label: "Reply", value: "Signed!", editable: true }],
       actions: [
-        { id: "archive", label: "Archive", behavior: "approve_action", instruction: "Archive the handled notice.", variant: "primary" },
+        { id: "send-reply", label: "Send reply", behavior: "approve_action", instruction: "Send the exact reply.", artifactBlockId: "draft", externalMutation: true, mailboxPolicy: "reply_from_source", variant: "primary" },
       ],
     });
-    const approved = await domain.runCardAction("inbox", "approved-and-completed", "archive");
+    const approved = await domain.runCardAction("inbox", "approved-and-completed", "send-reply");
+    await domain.claimWork("inbox", "thread-inbox");
+    await domain.verifyApprovedAction("inbox", approved.id, approved.capabilityToken, "dan@every.to");
+    await domain.completeWork("inbox", approved.id, approved.capabilityToken, { response: "Sent the verified reply." });
+
+    const awaitingCleanup = await store.readCard("inbox", "approved-and-completed");
+    expect(awaitingCleanup.status).toBe("to_review_updated");
+    expect(awaitingCleanup.readyForPass).toBe((await store.readConfig("inbox")).currentPass);
+
+    const cleanup = await domain.dismissCard("inbox", "approved-and-completed");
+    await domain.claimWork("inbox", "thread-inbox");
+    await domain.verifyApprovedAction("inbox", cleanup.id, cleanup.capabilityToken);
+    await domain.completeWork("inbox", cleanup.id, cleanup.capabilityToken, { response: "Archived every remaining source row." });
+    expect((await store.readCard("inbox", "approved-and-completed")).status).toBe("done");
+    await expect(domain.dismissCard("inbox", "approved-and-completed")).rejects.toThrow("default cleanup is already complete");
+  });
+
+  test("allows one verified cleanup for a done card that never completed cleanup", async () => {
+    const { store, domain } = await setup();
+    const card = await store.readCard("inbox", "inbox-ready-to-collect");
+    card.status = "done";
+    card.completedAt = "2026-06-15T12:00:00.000Z";
+    await store.writeCard(card);
+
+    const cleanup = await domain.dismissCard("inbox", card.id);
+    expect(cleanup.kind).toBe("default_cleanup");
+    expect((await store.readCard("inbox", card.id)).status).toBe("queued");
+  });
+
+  test("moves an explicitly terminal approved action to done", async () => {
+    const { store, domain } = await setup();
+    await domain.bindFeed("inbox", "thread-inbox");
+    await domain.upsertCard("inbox", {
+      id: "explicitly-terminal-action",
+      title: "Complete this terminal action.",
+      why: "No source cleanup or follow-through remains.",
+      blocks: [{ id: "brief", type: "memo", text: "Terminal after success." }],
+      actions: [
+        { id: "complete", label: "Complete", behavior: "approve_action", instruction: "Complete the terminal action.", variant: "primary" },
+      ],
+    });
+    const approved = await domain.runCardAction("inbox", "explicitly-terminal-action", "complete");
     await domain.claimWork("inbox", "thread-inbox");
     await domain.verifyApprovedAction("inbox", approved.id, approved.capabilityToken);
-    await domain.completeWork("inbox", approved.id, approved.capabilityToken, { response: "Archived." });
-    expect((await store.readCard("inbox", "approved-and-completed")).status).toBe("done");
+    await domain.completeWork("inbox", approved.id, approved.capabilityToken, { response: "Completed.", done: true });
+    expect((await store.readCard("inbox", "explicitly-terminal-action")).status).toBe("done");
   });
 
   test("routes card-specific buttons through preparation, exact approval, and default-cleanup semantics", async () => {

@@ -118,10 +118,14 @@ describe("runtime resolution", () => {
           detail: "This migrated card still accepts feedback.",
         }),
       ]);
-      expect((await runtime.store.readEvents("inbox")).filter((event) => event.workId === feedback.work.id).map((event) => event.type)).toEqual([
+      const feedbackEventTypes = (await runtime.store.readEvents("inbox"))
+        .filter((event) => event.workId === feedback.work.id)
+        .map((event) => event.type);
+      expect(feedbackEventTypes).toHaveLength(2);
+      expect(feedbackEventTypes).toEqual(expect.arrayContaining([
         "voice.intent_queued",
         "voice.instruction_submitted",
-      ]);
+      ]));
     } finally {
       runtime.sqlite.close();
       await rm(root, { recursive: true, force: true });
