@@ -1,17 +1,20 @@
 # Security
 
-Attention is local-first and binds its development server to `127.0.0.1` by default.
+Tend is local-first and binds its development server to `127.0.0.1` by default.
 
 ## Trust Boundary
 
-- The local Attention app stores workflow state and evidence.
+- The local Tend app stores workflow state and evidence.
 - Codex Desktop performs connector access.
-- Gmail, GitHub, Slack, browser, and other connector credentials are not stored by Attention.
+- Gmail, GitHub, Slack, browser, and other connector credentials are not stored by Tend.
 - External mutations require approved work and immediate `verify_action` checks.
 
 ## Localhost
 
-The API is a local HTTP endpoint. Treat it as a trusted-local interface and avoid exposing it on a public network.
+The API is a local HTTP endpoint and must not be exposed on a public network. Browser mutations
+require JSON, a loopback same-origin request, and a per-process mutation token fetched by the local
+UI. These checks prevent an unrelated website from silently posting to a running Tend server;
+they are not a substitute for keeping the listener on loopback.
 
 ## On Your Mind
 

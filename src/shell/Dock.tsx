@@ -4,7 +4,7 @@ import { sameTarget } from "../state/voiceTarget";
 import type { FeedView, VoiceTarget, WorkspaceView } from "../types";
 
 function targetLabel(target: VoiceTarget, state: WorkspaceView): string {
-  if (target.kind === "attention") return "Attention";
+  if (target.kind === "attention") return "Tend";
   if (target.kind === "feed") return state.feeds.find((feed) => feed.id === target.feedId)?.name ?? target.feedId;
   if (target.kind === "sweep") return "This sweep";
   if (target.kind === "card") return state.active.cards.find((card) => card.id === target.cardId)?.title ?? "Active card";
@@ -79,8 +79,8 @@ export function Dock({
           </div>
         </div>
         <div className="dock-row">
-          <textarea ref={inputRef} value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={onDockKeyDown} rows={1} placeholder="Tell Codex what to notice, change, or do…" />
-          <button className="button primary" type="submit">Send</button>
+          <textarea aria-label="Instruction for Codex" ref={inputRef} value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={onDockKeyDown} rows={1} placeholder="Tell Codex what to notice, change, or do…" />
+          <button className="button primary" type="submit" disabled={!value.trim()}>Send</button>
         </div>
         <div className="dock-footer">
           <div className="dock-hints"><kbd>↑</kbd>/<kbd>↓</kbd> change scope when empty · hold <kbd>{state.dictation.activationLabel}</kbd> to dictate · <kbd>Enter</kbd> send</div>

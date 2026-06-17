@@ -35,7 +35,7 @@ import { containsFullEmail } from "../shared/emailThread";
 import { AttentionStore, FEED_PROMPT_NAMES } from "./store";
 import { demoCards, feedConfig } from "./templates";
 import { detectMonologue } from "./monologue";
-import { digest, isoNow, makeId, makeToken, slugify } from "./util";
+import { digest, isoNow, makeId, makeToken, safeIdentifier, slugify } from "./util";
 import { actionDigest, cleanupDigest, configuredApprovalAction, requiredSourceMailbox, routineActionDigest, verifySourceMailbox } from "./workflow/approvals";
 import { queuedWork } from "./workflow/workItems";
 import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction } from "./mobile/projection";
@@ -88,7 +88,7 @@ function revisionLabel(target: VoiceTarget): string {
   if (target.kind === "source_recipe") return `Source recipe · ${target.sourceId}`;
   if (target.kind === "prompt_layer") return `Feed prompt · ${target.promptId}`;
   if (target.kind === "global_prompt") return `Global prompt · ${target.promptId}`;
-  return "Attention policy";
+  return "Tend policy";
 }
 
 const CARD_BLOCK_TYPES = new Set<CardBlock["type"]>([
@@ -850,7 +850,7 @@ export class AttentionDomain {
   async submitVoiceInstruction(anchorFeedId: string, requested: VoiceTarget, instruction: string) {
     if (!instruction.trim()) throw new Error("Instruction is required.");
     const target = await this.store.validateVoiceTarget(requested);
-    return this.store.serialize(async () => {
+    return this.store.serializeAtomic(async () => {
       if (target.kind === "sweep") {
         const feed = await this.store.readFeed(target.feedId);
         const visibleCardIds = feed.cards
@@ -1490,7 +1490,7 @@ export class AttentionDomain {
     if (!MOBILE_COMMAND_ID_PATTERN.test(command.id) || !command.feedId.trim() || !command.cardId.trim()) {
       throw new Error("Mobile command id, feedId, and cardId are required.");
     }
-    return this.store.serialize(async () => {
+    return this.store.serializeAtomic(async () => {
       if (await this.store.hasMobileCommandReceipt(command.id)) {
         const receipt = await this.store.readMobileCommandReceipt(command.id);
         if (
@@ -1701,11 +1701,13 @@ export class AttentionDomain {
     await this.assertThread(feedId, threadId, explicitCrossFeed);
     return this.store.serialize(async () => {
       const feed = await this.store.readFeed(feedId);
-      const existing = feed.work.find((work) => work.status === "working");
-      if (existing && !(await this.quarantineLegacyMutationWork(feed, existing))) return existing;
-      let work = feed.work.find((item) => item.status === "queued");
-      while (work && await this.quarantineLegacyMutationWork(feed, work)) {
-        work = feed.work.find((item) => item.status === "queued");
+      for (const existing of feed.work.filter((work) => work.status === "working")) {
+        if (!(await this.quarantineLegacyMutationWork(feed, existing))) return existing;
+      }
+      let work: WorkItem | undefined;
+      for (const candidate of feed.work.filter((item) => item.status === "queued")) {
+        if (await this.quarantineLegacyMutationWork(feed, candidate)) continue;
+        work ??= candidate;
       }
       if (!work) return null;
       work.status = "working";
@@ -2119,11 +2121,12 @@ export class AttentionDomain {
       kind: "feed_improvement",
       status: "to_review_new",
       eyebrow: "Feed setup",
-      title: `Teach ${config.name} where to look.`,
-      why: "The feed exists. Codex should now propose the smallest useful source recipe and a heartbeat cadence for review.",
+      title: `Connect ${config.name} to Codex.`,
+      why: "Tend created the feed locally. Give it one dedicated Codex thread before asking that thread to propose sources or collect anything.",
       blocks: [
         { id: "brief", type: "memo", label: "Your brief", text: normalizedBrief },
-        { id: "clarify", type: "clarification", label: "Next step", text: "Wake this feed's Codex thread or use the dock. Codex will propose sources in plain English before collecting." },
+        { id: "connect", type: "checklist", label: "Connect the operator", items: [`Keep Tend open in Codex Desktop's in-app browser`, `Create one fresh Codex thread just for ${config.name}`, `Run tend setup codex --feed ${config.id} and paste the prompt into that thread`, "Open or wake that thread and say “go deal with the feed” for the first run"] },
+        { id: "clarify", type: "clarification", label: "Then teach it where to look", text: "Once connected, the feed thread will propose the smallest useful source recipe and heartbeat cadence in plain English before collecting." },
       ],
       proposedAction: { label: "Propose source recipe", instruction: "Based on this feed brief, propose the smallest useful real source recipe and a heartbeat cadence. Return the proposal for review before collecting." },
       actions: [{ id: "propose-source-recipe", label: "Propose source recipe", behavior: "queue_instruction", instruction: "Based on this feed brief, propose the smallest useful real source recipe and a heartbeat cadence. Return the proposal for review before collecting.", variant: "primary", shortcut: "p" }],
@@ -2152,6 +2155,8 @@ export class AttentionDomain {
   }
 
   async upsertCard(feedId: string, input: Partial<Card> & Pick<Card, "id" | "title" | "why" | "blocks">): Promise<Card> {
+    safeIdentifier(feedId, "Feed id");
+    safeIdentifier(input.id, "Card id");
     validateCardBlocks(input.blocks);
     const sourceRunIds = validateSourceRunIds(input.sourceRunIds);
     return this.store.serialize(async () => {
