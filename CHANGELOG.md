@@ -5,6 +5,8 @@ a promise of ongoing maintenance.
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-06
+
 - Fix the public product name as Tend, consolidate runtime and agent operations under one `tend`
   command tree, remove the pre-release aliases and launchd runner, and clarify Codex
   in-app-browser onboarding.
