@@ -1,5 +1,6 @@
 import type { Tab } from "../app/types";
 import type { Card, CardAction, FeedView, RoutineActionGroup, WorkItemView } from "../types";
+import { safeConfiguredCardActions } from "../../shared/cardActions";
 
 export function visibleCards(feed: FeedView, tab: Tab): Card[] {
   const pass = feed.config.currentPass;
@@ -33,18 +34,20 @@ export function countFor(feed: FeedView, tab: Tab): number {
 }
 
 export function visibleCardActions(card: Card): CardAction[] {
-  const archive: CardAction = { id: "default-cleanup", label: "Archive", behavior: "default_cleanup", variant: "secondary", shortcut: "x" };
-  if (card.actions?.length) {
-    return card.actions.some((action) => action.behavior === "default_cleanup" || action.label.trim().toLowerCase() === "archive")
-      ? card.actions
-      : [archive, ...card.actions];
+  const dismiss: CardAction = { id: "dismiss-card", label: "Dismiss card", behavior: "dismiss_card", variant: "secondary", shortcut: "d" };
+  const configuredActions = safeConfiguredCardActions(card.actions);
+  if (configuredActions.length) {
+    // Local dismissal is always available unless the card author supplied a custom local-dismiss
+    // control. Source cleanup remains a separate, explicitly configured action.
+    return configuredActions.some((action) => action.behavior === "dismiss_card") ? configuredActions : [dismiss, ...configuredActions];
   }
-  if (!card.proposedAction || card.proposedAction.label === "Decide disposition") return [archive];
+  if (!card.proposedAction || card.proposedAction.label === "Decide disposition") return [dismiss];
   if (card.proposedAction.label === "Archive" || card.proposedAction.label === "Archive this thread") {
-    return [{ ...archive, variant: "primary" }];
+    // The card explicitly proposes archiving the source, so surface the connector cleanup.
+    return [dismiss, { id: "default-cleanup", label: "Archive", behavior: "default_cleanup", variant: "primary", shortcut: "x" }];
   }
   return [
-    archive,
+    dismiss,
     {
       id: "proposed-action",
       label: card.proposedAction.label,

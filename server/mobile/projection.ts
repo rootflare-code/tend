@@ -9,6 +9,7 @@ import type {
   RoutineActionGroup,
   WorkItemView,
 } from "../../shared/types";
+import { safeConfiguredCardActions } from "../../shared/cardActions";
 import {
   MOBILE_SCHEMA_VERSION,
   type MobileActionConfirmation,
@@ -125,6 +126,7 @@ function projectCard(feed: FeedView, card: Card, generation: string, reviewIndex
     createdAt: card.createdAt,
     updatedAt: card.updatedAt,
     ...(card.completedAt ? { completedAt: card.completedAt } : {}),
+    ...(card.completionDisposition ? { completionDisposition: card.completionDisposition } : {}),
   } satisfies Omit<MobileCardProjection, "cardDigest">;
   return { ...base, cardDigest: digest(base) };
 }
@@ -207,24 +209,26 @@ function projectCardAction(feed: FeedView, card: Card, action: CardAction): Mobi
 }
 
 function visibleCardActions(card: Card): CardAction[] {
-  const archive: CardAction = {
-    id: "default-cleanup",
-    label: "Archive",
-    behavior: "default_cleanup",
+  const dismiss: CardAction = {
+    id: "dismiss-card",
+    label: "Dismiss card",
+    behavior: "dismiss_card",
     variant: "secondary",
-    shortcut: "x",
+    shortcut: "d",
   };
-  if (card.actions?.length) {
-    return card.actions.some((action) => action.behavior === "default_cleanup" || action.label.trim().toLowerCase() === "archive")
-      ? card.actions
-      : [archive, ...card.actions];
+  const configuredActions = safeConfiguredCardActions(card.actions);
+  if (configuredActions.length) {
+    // Local dismissal is always available unless the card author supplied a custom local-dismiss
+    // control. Source cleanup remains a separate, explicitly configured action.
+    return configuredActions.some((action) => action.behavior === "dismiss_card") ? configuredActions : [dismiss, ...configuredActions];
   }
-  if (!card.proposedAction || card.proposedAction.label === "Decide disposition") return [archive];
+  if (!card.proposedAction || card.proposedAction.label === "Decide disposition") return [dismiss];
   if (card.proposedAction.label === "Archive" || card.proposedAction.label === "Archive this thread") {
-    return [{ ...archive, variant: "primary" }];
+    // The card explicitly proposes archiving the source, so surface the connector cleanup.
+    return [dismiss, { id: "default-cleanup", label: "Archive", behavior: "default_cleanup", variant: "primary", shortcut: "x" }];
   }
   return [
-    archive,
+    dismiss,
     {
       id: "proposed-action",
       label: card.proposedAction.label,

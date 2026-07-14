@@ -38,6 +38,7 @@ import type {
   WorkspaceRevision,
 } from "../shared/types";
 import type { MobileActionProjection, MobileCommand, MobileCommandResult, MobileCommandReceipt } from "../shared/mobile";
+import { isReservedCardActionId, safeConfiguredCardActions } from "../shared/cardActions";
 import { containsFullEmail } from "../shared/emailThread";
 import { agentLabel, effectiveWorkLane } from "../shared/lanes";
 import { agentPresenceLiveness, AttentionStore, FEED_PROMPT_NAMES, workItemView } from "./store";
@@ -326,6 +327,23 @@ function validateCardBlocks(blocks: unknown): asserts blocks is CardBlock[] {
         break;
     }
   }
+}
+
+function validateCardActions(actions: CardAction[] | undefined): void {
+  if (!actions) return;
+  const ids = new Set<string>();
+  for (const action of actions) {
+    if (!action.id?.trim()) throw new Error("Card action ids must be non-empty strings.");
+    if (isReservedCardActionId(action.id)) throw new Error(`Card action id "${action.id}" is reserved by Tend.`);
+    if (ids.has(action.id)) throw new Error(`Card action id "${action.id}" must be unique within a card.`);
+    ids.add(action.id);
+  }
+}
+
+function offersSourceCleanup(card: Card): boolean {
+  const configuredActions = safeConfiguredCardActions(card.actions);
+  if (configuredActions.length) return configuredActions.some((action) => action.behavior === "default_cleanup");
+  return card.proposedAction?.label === "Archive" || card.proposedAction?.label === "Archive this thread";
 }
 
 function validateSourceRunIds(sourceRunIds: unknown): string[] | undefined {
@@ -1420,7 +1438,7 @@ export class AttentionDomain {
     return work;
   }
 
-  private async dismissCardLocked(
+  private async queueSourceCleanupLocked(
     feedId: string,
     cardId: string,
     sourceMobileCommandId?: string,
@@ -1437,6 +1455,7 @@ export class AttentionDomain {
       )
     );
     if (card.status === "done" && completedCleanup) throw new Error("This card's default cleanup is already complete.");
+    if (!offersSourceCleanup(card)) throw new Error("Source cleanup is not available for this card.");
     const approvalDigest = cleanupDigest(card, config.defaultCleanup);
     const active = feedWork.filter((work) =>
       work.cardId === cardId
@@ -1472,6 +1491,10 @@ export class AttentionDomain {
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
     card.status = "queued";
+    // A card can be cleaned up after a local dismissal; queuing cleanup supersedes the dismissed
+    // done-state, so clear it to avoid a stale disposition if the cleanup is later undone.
+    card.completedAt = undefined;
+    card.completionDisposition = undefined;
     appendHistory(card, "user.default_cleanup_approved", config.defaultCleanup);
     await this.persistQueuedWork(feedId, work, {
       afterWrite: async () => {
@@ -1510,21 +1533,59 @@ export class AttentionDomain {
     return this.store.serialize(() => this.approveActionLocked(feedId, cardId, cardActionId));
   }
 
-  async runCardAction(feedId: string, cardId: string, cardActionId: string): Promise<WorkItem> {
-    if (cardActionId === "default-cleanup") return this.dismissCard(feedId, cardId);
-    if (cardActionId === "proposed-action") return this.approveAction(feedId, cardId);
+  async runCardAction(feedId: string, cardId: string, cardActionId: string): Promise<WorkItem | Card> {
     const card = await this.store.readCard(feedId, cardId);
+    if (card.actions?.some((action) => action.id === cardActionId && isReservedCardActionId(action.id))) {
+      throw new Error(`Card action id "${cardActionId}" is reserved by Tend.`);
+    }
+    if (cardActionId === "default-cleanup") return this.queueSourceCleanup(feedId, cardId);
+    if (cardActionId === "dismiss-card") return this.dismissCard(feedId, cardId);
+    if (cardActionId === "proposed-action") return this.approveAction(feedId, cardId);
     const action = card.actions?.find((item) => item.id === cardActionId);
     if (!action) throw new Error("Card action not found.");
-    if (action.behavior === "default_cleanup") return this.dismissCard(feedId, cardId);
+    if (action.behavior === "default_cleanup") return this.queueSourceCleanup(feedId, cardId);
+    if (action.behavior === "dismiss_card") return this.dismissCard(feedId, cardId);
     await this.assertCardSourceCurrent(card);
     if (!action.instruction?.trim()) throw new Error("Card action instruction is required.");
     if (action.behavior === "queue_instruction") return this.queueInstruction(feedId, cardId, action.instruction);
     return this.approveAction(feedId, cardId, action.id);
   }
 
-  async dismissCard(feedId: string, cardId: string): Promise<WorkItem> {
+  // Queue the feed's configured source cleanup as verified work. This can mutate the source
+  // connector (for example, archiving an email) and is intentionally separate from local dismissal.
+  async queueSourceCleanup(feedId: string, cardId: string): Promise<WorkItem> {
+    return this.store.serialize(() => this.queueSourceCleanupLocked(feedId, cardId));
+  }
+
+  // Local, connector-free dismissal: removes a card from review without creating any WorkItem,
+  // approval digest, or external connector mutation. Reversible via returnCardToReview().
+  async dismissCard(feedId: string, cardId: string): Promise<Card> {
     return this.store.serialize(() => this.dismissCardLocked(feedId, cardId));
+  }
+
+  private async dismissCardLocked(feedId: string, cardId: string, sourceMobileCommandId?: string): Promise<Card> {
+    const config = await this.store.readConfig(feedId);
+    const card = await this.store.readCard(feedId, cardId);
+    if (card.routineActionGroupId) throw new Error("This card belongs to a routine action group. Review the group instead.");
+    if (
+      (card.status !== "to_review_new" && card.status !== "to_review_updated")
+      || card.readyForPass > config.currentPass
+      || card.sweep?.hidden
+    ) {
+      throw new Error("Only a card under review can be dismissed.");
+    }
+    card.status = "done";
+    card.completedAt = isoNow();
+    card.completionDisposition = "dismissed";
+    appendHistory(card, "user.card_dismissed", sourceMobileCommandId);
+    await this.store.writeCard(card);
+    await this.store.appendEvent({
+      feedId,
+      cardId,
+      type: "card.dismissed",
+      ...(sourceMobileCommandId ? { detail: { sourceMobileCommandId } } : {}),
+    });
+    return card;
   }
 
   async upsertRoutineActionGroup(feedId: string, input: Pick<RoutineActionGroup, "id" | "label" | "summary" | "proposedAction" | "items">): Promise<RoutineActionGroup> {
@@ -1636,7 +1697,7 @@ export class AttentionDomain {
     return work;
   }
 
-  async undoDismiss(feedId: string, cardId: string): Promise<Card> {
+  async undoSourceCleanup(feedId: string, cardId: string): Promise<Card> {
     return this.store.serialize(async () => {
       const feed = await this.store.readFeed(feedId);
       const work = [...(await this.store.readWorkItems(feedId))].reverse().find((item) => item.cardId === cardId && item.kind === "default_cleanup" && item.status === "queued");
@@ -1645,6 +1706,8 @@ export class AttentionDomain {
       const card = await this.store.readCard(feedId, cardId);
       card.status = "to_review_updated";
       card.readyForPass = feed.config.currentPass;
+      card.completedAt = undefined;
+      card.completionDisposition = undefined;
       appendHistory(card, "user.default_cleanup_undone", work.id);
       await this.store.writeWork(work);
       await this.store.writeCard(card);
@@ -1674,6 +1737,7 @@ export class AttentionDomain {
       card.status = "to_review_updated";
       card.readyForPass = feed.config.currentPass;
       card.completedAt = undefined;
+      card.completionDisposition = undefined;
       appendHistory(card, "user.returned_to_review");
       await this.store.writeCard(card);
       await this.store.appendEvent({ feedId, cardId, type: "card.returned_to_review", detail: { cancelledWorkIds: activeWork.map((work) => work.id) } });
@@ -1788,15 +1852,30 @@ export class AttentionDomain {
         case "archive": {
           const action = requireMobileAction(projection.actions, command.actionId ?? "default-cleanup", command.expectedActionDigest);
           if (action.behavior !== "default_cleanup") throw new Error("Mobile archive action is no longer available.");
-          work = await this.dismissCardLocked(command.feedId, command.cardId, command.id);
+          work = await this.queueSourceCleanupLocked(command.feedId, command.cardId, command.id);
+          break;
+        }
+        case "dismiss": {
+          const action = requireMobileAction(projection.actions, command.actionId ?? "dismiss-card", command.expectedActionDigest);
+          if (action.behavior !== "dismiss_card") throw new Error("Mobile dismiss action is no longer available.");
+          await this.dismissCardLocked(command.feedId, command.cardId, command.id);
           break;
         }
         case "approve_action": {
           if (!command.actionId) throw new Error("Mobile approval needs an action id.");
           const action = requireMobileAction(projection.actions, command.actionId, command.expectedActionDigest);
+          // Mobile schema v1 mapped every non-cleanup action to approve_action. Treat its synthetic
+          // dismiss control as the local disposition while installed v1 clients age out.
+          if (action.behavior === "dismiss_card") {
+            await this.dismissCardLocked(command.feedId, command.cardId, command.id);
+            break;
+          }
           if (action.behavior !== "approve_action") throw new Error("Mobile approval action is no longer available.");
-          const cardActionId = command.actionId === "proposed-action" ? undefined : command.actionId;
           const card = structuredClone(await this.store.readCard(command.feedId, command.cardId));
+          if (card.actions?.some((item) => item.id === command.actionId && isReservedCardActionId(item.id))) {
+            throw new Error(`Card action id "${command.actionId}" is reserved by Tend.`);
+          }
+          const cardActionId = command.actionId === "proposed-action" ? undefined : command.actionId;
           const configured = configuredApprovalAction(card, cardActionId);
           const edits = command.edits ?? {};
           if (Object.keys(edits).length && !configured.artifactBlockId) {
@@ -1873,6 +1952,7 @@ export class AttentionDomain {
           card.status = "to_review_updated";
           card.readyForPass = feed.config.currentPass;
           card.completedAt = undefined;
+          card.completionDisposition = undefined;
           appendHistory(card, "user.returned_to_review", command.id);
           await this.store.writeCard(card);
           await this.store.appendEvent({
@@ -2039,6 +2119,8 @@ export class AttentionDomain {
         if (!hasActiveWork) {
           card.status = "to_review_updated";
           card.readyForPass = feed.config.currentPass;
+          card.completedAt = undefined;
+          card.completionDisposition = undefined;
           appendHistory(card, "user.cancelled_queued_work", work.id);
           await this.store.writeCard(card);
         }
@@ -2056,6 +2138,7 @@ export class AttentionDomain {
 
   async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; actions?: CardAction[]; done?: boolean; postAction?: PostActionCompletion }): Promise<WorkItem> {
     if (result.blocks) validateCardBlocks(result.blocks);
+    validateCardActions(result.actions);
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Work item is not currently claimed.");
@@ -2098,6 +2181,7 @@ export class AttentionDomain {
           const card = await this.store.readCard(feedId, item.cardId);
           card.status = "done";
           card.completedAt = isoNow();
+          card.completionDisposition = "completed";
           appendHistory(card, "routine_action.completed", work.id);
           await this.store.writeCard(card);
         }
@@ -2175,6 +2259,7 @@ export class AttentionDomain {
           : Boolean(result.done || work.kind === "default_cleanup");
         card.status = done ? "done" : "to_review_updated";
         card.completedAt = done ? isoNow() : undefined;
+        card.completionDisposition = done ? "completed" : undefined;
         card.readyForPass = work.kind === "execute_approved_action" && !done
           ? config.currentPass
           : config.currentPass + 1;
@@ -2331,6 +2416,7 @@ export class AttentionDomain {
       const done = work.completionCleanup ? result.postAction!.disposition === "done" : Boolean(result.done);
       card.status = done ? "done" : "to_review_updated";
       card.completedAt = done ? completedAt : undefined;
+      card.completionDisposition = done ? "completed" : undefined;
       card.readyForPass = done ? config.currentPass + 1 : config.currentPass;
       appendHistory(card, "codex.approved_action_reconciled", result.response.trim());
       work.status = "completed";
@@ -2447,6 +2533,7 @@ export class AttentionDomain {
     safeIdentifier(feedId, "Feed id");
     safeIdentifier(input.id, "Card id");
     validateCardBlocks(input.blocks);
+    validateCardActions(input.actions);
     const sourceRunIds = validateSourceRunIds(input.sourceRunIds);
     return this.store.serialize(async () => {
       const config = await this.store.readConfig(feedId);
@@ -2472,7 +2559,8 @@ export class AttentionDomain {
         readyForPass: input.readyForPass ?? existing?.readyForPass ?? config.currentPass,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
-        completedAt: input.completedAt,
+        completedAt: resurfaced ? undefined : input.completedAt ?? existing?.completedAt,
+        completionDisposition: resurfaced ? undefined : input.completionDisposition ?? existing?.completionDisposition,
         routineActionGroupId: input.routineActionGroupId ?? (resurfaced ? undefined : existing?.routineActionGroupId),
         history: existing?.history ?? [],
       };

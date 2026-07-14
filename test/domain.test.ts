@@ -73,6 +73,15 @@ async function bindClaudeLane(store: AttentionStore, feedId: string, threadId = 
   });
 }
 
+async function enableSourceCleanup(store: AttentionStore, feedId: string, cardId: string): Promise<void> {
+  const card = await store.readCard(feedId, cardId);
+  card.actions = [
+    ...(card.actions ?? []).filter((action) => action.behavior !== "default_cleanup"),
+    { id: "archive-source", label: "Archive", behavior: "default_cleanup", shortcut: "x" },
+  ];
+  await store.writeCard(card);
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -1149,7 +1158,7 @@ describe("Claude wake emission", () => {
       { type: "card_instruction", work: await domain.queueInstruction("inbox", "wake-instruction", "Queue path private instruction.") },
       { type: "feed_instruction", work: await domain.queueFeedInstruction("inbox", "Feed-level private instruction.") },
       { type: "approved_action", work: await domain.approveAction("inbox", "wake-approval", "send") },
-      { type: "default_cleanup", work: await domain.dismissCard("inbox", "wake-cleanup") },
+      { type: "default_cleanup", work: await domain.queueSourceCleanup("inbox", "wake-cleanup") },
       { type: "routine_action_batch", work: await domain.approveRoutineActionGroup("inbox", (await domain.upsertRoutineActionGroup("inbox", {
         id: "wake-routine",
         label: "Archive batch",
@@ -1250,7 +1259,8 @@ describe("Claude wake emission", () => {
     await bindClaudeLane(store, "inbox", "thread-claude");
 
     await domain.queueFeedInstruction("inbox", "Codex feed instruction.");
-    await domain.dismissCard("inbox", "inbox-ready-to-collect");
+    await enableSourceCleanup(store, "inbox", "inbox-ready-to-collect");
+    await domain.queueSourceCleanup("inbox", "inbox-ready-to-collect");
     await domain.submitVoiceInstruction("inbox", { kind: "sweep", feedId: "inbox" }, "Codex sweep feedback.");
 
     expect(await readClaudeWakeLines(root)).toEqual([]);
@@ -1709,7 +1719,7 @@ describe("approval, learning, and heartbeat safety", () => {
     const completed = await store.readCard("inbox", "approved-and-completed");
     expect(completed.status).toBe("done");
     expect((await store.readFeed("inbox")).work.filter((work) => work.cardId === completed.id && work.kind === "default_cleanup")).toHaveLength(0);
-    await expect(domain.dismissCard("inbox", completed.id)).rejects.toThrow("default cleanup is already complete");
+    await expect(domain.queueSourceCleanup("inbox", completed.id)).rejects.toThrow("default cleanup is already complete");
   });
 
   test("preserves a successful action when bundled cleanup is blocked", async () => {
@@ -1755,9 +1765,10 @@ describe("approval, learning, and heartbeat safety", () => {
     const card = await store.readCard("inbox", "inbox-ready-to-collect");
     card.status = "done";
     card.completedAt = "2026-06-15T12:00:00.000Z";
+    card.actions = [{ id: "archive-source", label: "Archive", behavior: "default_cleanup" }];
     await store.writeCard(card);
 
-    const cleanup = await domain.dismissCard("inbox", card.id);
+    const cleanup = await domain.queueSourceCleanup("inbox", card.id);
     expect(cleanup.kind).toBe("default_cleanup");
     expect((await store.readCard("inbox", card.id)).status).toBe("queued");
   });
@@ -1832,18 +1843,22 @@ describe("approval, learning, and heartbeat safety", () => {
 
   test("queues default cleanup for Codex and allows a brief undo", async () => {
     const { store, domain } = await setup();
-    const cleanup = await domain.dismissCard("inbox", "inbox-ready-to-collect");
+    await enableSourceCleanup(store, "inbox", "inbox-ready-to-collect");
+    const cleanup = await domain.queueSourceCleanup("inbox", "inbox-ready-to-collect");
     expect(cleanup.kind).toBe("default_cleanup");
     expect((await store.readCard("inbox", "inbox-ready-to-collect")).status).toBe("queued");
-    await domain.undoDismiss("inbox", "inbox-ready-to-collect");
+    await domain.undoSourceCleanup("inbox", "inbox-ready-to-collect");
     expect((await store.readWork("inbox", cleanup.id)).status).toBe("cancelled");
     expect((await store.readCard("inbox", "inbox-ready-to-collect")).status).toBe("to_review_updated");
     await domain.bindFeed("inbox", "thread-inbox");
-    const secondCleanup = await domain.dismissCard("inbox", "inbox-ready-to-collect");
+    const secondCleanup = await domain.queueSourceCleanup("inbox", "inbox-ready-to-collect");
     const claimed = await domain.claimWork("inbox", "thread-inbox") as WorkItem;
     expect((await domain.verifyApprovedAction("inbox", secondCleanup.id, claimed.capabilityToken)).action.instruction).toBe("Archive the email thread.");
     await domain.completeWork("inbox", secondCleanup.id, claimed.capabilityToken, { response: "Archived the authoritative email thread." });
-    expect((await store.readCard("inbox", "inbox-ready-to-collect")).status).toBe("done");
+    expect(await store.readCard("inbox", "inbox-ready-to-collect")).toMatchObject({
+      status: "done",
+      completionDisposition: "completed",
+    });
   });
 
   test("queues one exact approval for a conservative routine-action group and records a collapsed audit", async () => {
@@ -1995,9 +2010,10 @@ describe("approval, learning, and heartbeat safety", () => {
   test("collapses concurrent dismiss cleanup and rejects changed cleanup configuration", async () => {
     const { store, domain } = await setup();
     await domain.bindFeed("inbox", "thread-inbox");
+    await enableSourceCleanup(store, "inbox", "inbox-ready-to-collect");
     const [first, second] = await Promise.all([
-      domain.dismissCard("inbox", "inbox-ready-to-collect"),
-      domain.dismissCard("inbox", "inbox-ready-to-collect"),
+      domain.queueSourceCleanup("inbox", "inbox-ready-to-collect"),
+      domain.queueSourceCleanup("inbox", "inbox-ready-to-collect"),
     ]);
     expect(second.id).toBe(first.id);
     expect((await store.readFeed("inbox")).work.filter((work) => work.kind === "default_cleanup" && (work.status === "queued" || work.status === "working"))).toHaveLength(1);
@@ -2013,7 +2029,8 @@ describe("approval, learning, and heartbeat safety", () => {
   test("quarantines legacy mutation work without an approval digest and continues draining", async () => {
     const { store, domain } = await setup();
     await domain.bindFeed("inbox", "thread-inbox");
-    const legacy = await domain.dismissCard("inbox", "inbox-ready-to-collect");
+    await enableSourceCleanup(store, "inbox", "inbox-ready-to-collect");
+    const legacy = await domain.queueSourceCleanup("inbox", "inbox-ready-to-collect");
     legacy.approvalDigest = undefined;
     legacy.createdAt = new Date(Date.now() - 60_000).toISOString();
     await store.writeWork(legacy);
@@ -2422,5 +2439,250 @@ describe("scoped persistent voice dock routing", () => {
       "revision.proposal_updated",
       "revision.applied",
     ]));
+  });
+});
+
+describe("local card dismissal (Tend-only, no source cleanup)", () => {
+  test("moves a reviewable card to done with no work item, no cleanup, and a dismissed disposition", async () => {
+    const { store, domain } = await setup();
+
+    const card = await domain.dismissCard("inbox", "inbox-ready-to-collect");
+
+    expect(card.status).toBe("done");
+    expect(card.completionDisposition).toBe("dismissed");
+    expect(card.completedAt).toBeTruthy();
+
+    // The strongest invariant: no WorkItem of any kind was created, so there is no approval digest
+    // and no connector authorization anywhere for this dismissal.
+    const work = (await store.readWorkItems("inbox")).filter((item) => item.cardId === "inbox-ready-to-collect");
+    expect(work).toHaveLength(0);
+
+    const events = (await store.readEvents("inbox")).map((event) => event.type);
+    expect(events).toContain("card.dismissed");
+    expect(events).not.toContain("cleanup.queued");
+
+    const stored = await store.readCard("inbox", "inbox-ready-to-collect");
+    expect(stored.history.map((entry) => entry.type)).toContain("user.card_dismissed");
+    expect(stored.history.map((entry) => entry.type)).not.toContain("user.default_cleanup_approved");
+  });
+
+  test("runCardAction routes a dismiss_card action to local dismissal, not source cleanup", async () => {
+    const { store, domain } = await setup();
+    await domain.upsertCard("inbox", {
+      id: "dismiss-me",
+      title: "Nothing to do here.",
+      why: "Clear it from review without touching the source.",
+      blocks: [{ id: "memo", type: "memo", text: "No action needed." }],
+      actions: [{ id: "set-aside", label: "Set aside", behavior: "dismiss_card" }],
+    });
+
+    const result = await domain.runCardAction("inbox", "dismiss-me", "set-aside");
+
+    expect((result as Card).status).toBe("done");
+    expect((result as Card).completionDisposition).toBe("dismissed");
+    expect((await store.readWorkItems("inbox")).filter((item) => item.cardId === "dismiss-me")).toHaveLength(0);
+  });
+
+  test("the injected dismiss-card action id also dismisses locally", async () => {
+    const { store, domain } = await setup();
+
+    const result = await domain.runCardAction("inbox", "inbox-ready-to-collect", "dismiss-card");
+
+    expect((result as Card).status).toBe("done");
+    expect((result as Card).completionDisposition).toBe("dismissed");
+    expect((await store.readWorkItems("inbox")).filter((item) => item.cardId === "inbox-ready-to-collect")).toHaveLength(0);
+  });
+
+  test("return-to-review reverses a local dismissal and clears the disposition", async () => {
+    const { domain } = await setup();
+
+    await domain.dismissCard("inbox", "inbox-ready-to-collect");
+    const card = await domain.returnCardToReview("inbox", "inbox-ready-to-collect");
+
+    expect(card.status).toBe("to_review_updated");
+    expect(card.completedAt).toBeUndefined();
+    expect(card.completionDisposition).toBeUndefined();
+    expect(card.history.map((entry) => entry.type)).toContain("user.returned_to_review");
+  });
+
+  test("explicit default cleanup still queues a verifiable connector work item, unchanged", async () => {
+    const { store, domain } = await setup();
+    await enableSourceCleanup(store, "inbox", "inbox-ready-to-collect");
+
+    const work = await domain.queueSourceCleanup("inbox", "inbox-ready-to-collect");
+
+    expect(work.kind).toBe("default_cleanup");
+    expect(work.approvalDigest).toBeTruthy();
+    expect((await store.readCard("inbox", "inbox-ready-to-collect")).status).toBe("queued");
+  });
+
+  test("proposed Archive labels opt a card into synthetic source cleanup", async () => {
+    const { store, domain } = await setup();
+
+    for (const [index, label] of ["Archive", "Archive this thread"].entries()) {
+      const cardId = `proposed-cleanup-${index}`;
+      await domain.upsertCard("inbox", {
+        id: cardId,
+        title: "Archive this notice.",
+        why: "The proposed disposition explicitly opts into source cleanup.",
+        blocks: [{ id: "memo", type: "memo", text: "Routine notice." }],
+        proposedAction: { label, instruction: "Archive the source thread." },
+      });
+
+      const work = await domain.runCardAction("inbox", cardId, "default-cleanup");
+      expect((work as WorkItem).kind).toBe("default_cleanup");
+      expect((work as WorkItem).approvalDigest).toBeTruthy();
+    }
+    expect((await store.readWorkItems("inbox")).filter((work) => work.kind === "default_cleanup")).toHaveLength(2);
+  });
+
+  test("configured non-cleanup actions suppress proposed Archive source cleanup", async () => {
+    const { store, domain } = await setup();
+    await domain.upsertCard("inbox", {
+      id: "simulated-archive",
+      title: "Simulate archiving without touching the source.",
+      why: "The configured action is preparation work, not connector authorization.",
+      blocks: [{ id: "memo", type: "memo", text: "Do not touch Gmail." }],
+      proposedAction: { label: "Archive", instruction: "Archive the source thread." },
+      actions: [{
+        id: "simulate-archive",
+        label: "Archive (simulation)",
+        behavior: "queue_instruction",
+        instruction: "Simulate the cleanup and report what would happen without changing the source.",
+      }],
+    });
+
+    await expect(domain.runCardAction("inbox", "simulated-archive", "default-cleanup")).rejects.toThrow("not available");
+    expect((await store.readWorkItems("inbox")).filter((work) => work.cardId === "simulated-archive")).toHaveLength(0);
+  });
+
+  test("local dismiss rejects a card that is not under review", async () => {
+    const { store, domain } = await setup();
+
+    await enableSourceCleanup(store, "inbox", "inbox-ready-to-collect");
+    await domain.queueSourceCleanup("inbox", "inbox-ready-to-collect"); // queues cleanup → card leaves review
+
+    await expect(domain.dismissCard("inbox", "inbox-ready-to-collect")).rejects.toThrow("under review");
+  });
+
+  test("local dismiss rejects hidden and future-pass cards", async () => {
+    const { store, domain } = await setup();
+    const card = await store.readCard("inbox", "inbox-ready-to-collect");
+    card.readyForPass = (await store.readConfig("inbox")).currentPass + 1;
+    await store.writeCard(card);
+    await expect(domain.dismissCard("inbox", card.id)).rejects.toThrow("under review");
+
+    card.readyForPass = 1;
+    card.sweep = { rank: 1, hidden: true, feedbackId: "hidden-feedback" };
+    await store.writeCard(card);
+    await expect(domain.dismissCard("inbox", card.id)).rejects.toThrow("under review");
+  });
+
+  test("legacy cards without a completionDisposition remain valid and returnable", async () => {
+    const { store, domain } = await setup();
+
+    const legacy = await store.readCard("inbox", "inbox-ready-to-collect");
+    expect(legacy.completionDisposition).toBeUndefined();
+    legacy.status = "done";
+    legacy.completedAt = new Date("2026-07-01T00:00:00.000Z").toISOString();
+    await store.writeCard(legacy);
+
+    const returned = await domain.returnCardToReview("inbox", "inbox-ready-to-collect");
+    expect(returned.status).toBe("to_review_updated");
+    expect(returned.completionDisposition).toBeUndefined();
+  });
+
+  test("cleaning up a locally dismissed card then undoing leaves a clean reviewable card", async () => {
+    const { store, domain } = await setup();
+
+    await enableSourceCleanup(store, "inbox", "inbox-ready-to-collect");
+    await domain.dismissCard("inbox", "inbox-ready-to-collect");
+    await domain.queueSourceCleanup("inbox", "inbox-ready-to-collect"); // queue source cleanup on the dismissed card
+
+    const queued = await store.readCard("inbox", "inbox-ready-to-collect");
+    expect(queued.status).toBe("queued");
+    expect(queued.completionDisposition).toBeUndefined();
+    expect(queued.completedAt).toBeUndefined();
+
+    const undone = await domain.undoSourceCleanup("inbox", "inbox-ready-to-collect");
+    expect(undone.status).toBe("to_review_updated");
+    expect(undone.completionDisposition).toBeUndefined();
+    expect(undone.completedAt).toBeUndefined();
+  });
+
+  test("upsertCard preserves an explicit completionDisposition", async () => {
+    const { domain } = await setup();
+
+    const card = await domain.upsertCard("inbox", {
+      id: "explicit-dismissed",
+      title: "Already dismissed",
+      why: "Imported as dismissed.",
+      status: "done",
+      completedAt: "2026-07-01T00:00:00.000Z",
+      completionDisposition: "dismissed",
+      blocks: [{ id: "memo", type: "memo", text: "n/a" }],
+    });
+
+    expect(card.status).toBe("done");
+    expect(card.completionDisposition).toBe("dismissed");
+  });
+
+  test("partial upserts preserve dismissal metadata while explicit resurfacing clears it", async () => {
+    const { domain } = await setup();
+    const dismissed = await domain.dismissCard("inbox", "inbox-ready-to-collect");
+
+    const updated = await domain.upsertCard("inbox", {
+      id: dismissed.id,
+      title: "Updated after dismissal",
+      why: dismissed.why,
+      blocks: dismissed.blocks,
+    });
+    expect(updated.status).toBe("done");
+    expect(updated.completedAt).toBe(dismissed.completedAt);
+    expect(updated.completionDisposition).toBe("dismissed");
+
+    const resurfaced = await domain.upsertCard("inbox", {
+      id: dismissed.id,
+      title: "Back for review",
+      why: dismissed.why,
+      blocks: dismissed.blocks,
+      status: "to_review_updated",
+    });
+    expect(resurfaced.completedAt).toBeUndefined();
+    expect(resurfaced.completionDisposition).toBeUndefined();
+  });
+
+  test("rejects card-authored ids reserved for synthetic Tend actions", async () => {
+    const { domain } = await setup();
+
+    for (const id of ["dismiss-card", "default-cleanup", "proposed-action"]) {
+      await expect(domain.upsertCard("inbox", {
+        id: `reserved-${id}`,
+        title: "Reserved action",
+        why: "Synthetic dispatch must not preempt a card-authored action.",
+        blocks: [{ id: "memo", type: "memo", text: "Reserved." }],
+        actions: [{ id, label: "Custom", behavior: "queue_instruction", instruction: "Do custom work." }],
+      })).rejects.toThrow("reserved by Tend");
+    }
+  });
+
+  test("rejects reserved ids from legacy cards and completed-work results", async () => {
+    const { store, domain } = await setup();
+    const legacy = await store.readCard("inbox", "inbox-ready-to-collect");
+    legacy.actions = [{ id: "dismiss-card", label: "Custom dismiss", behavior: "queue_instruction", instruction: "Do unrelated work." }];
+    await store.writeCard(legacy);
+
+    await expect(domain.runCardAction("inbox", legacy.id, "dismiss-card")).rejects.toThrow("reserved by Tend");
+    expect((await store.readWorkItems("inbox")).filter((work) => work.cardId === legacy.id)).toHaveLength(0);
+
+    await domain.bindFeed("inbox", "thread-inbox");
+    const queued = await domain.queueInstruction("inbox", legacy.id, "Inspect this safely.");
+    const claimed = await domain.claimWork("inbox", "thread-inbox") as WorkItem;
+    await expect(domain.completeWork("inbox", queued.id, claimed.capabilityToken, {
+      response: "Prepared a safe result.",
+      actions: [{ id: "proposed-action", label: "Custom", behavior: "queue_instruction", instruction: "Unsafe collision." }],
+    })).rejects.toThrow("reserved by Tend");
+    expect((await store.readWork("inbox", queued.id)).status).toBe("working");
+    expect((await store.readCard("inbox", legacy.id)).actions).toEqual(legacy.actions);
   });
 });
