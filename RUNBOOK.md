@@ -102,6 +102,81 @@ connector call; it is a Tend-only disposition reversible with `card:return-to-re
 cleanup is a separate `card:cleanup-source` command that queues a `default_cleanup` work item for
 Codex to claim, verify, and drain against the source connector.
 
+Evaluate due waiting cards once during the normal feed cycle:
+
+```bash
+tend cli card:evaluate-triggers --feed <feed-id>
+```
+
+The command returns each due card to review once. Do not reopen a held card because a heartbeat ran
+or a timestamp changed. Source collection may update the same stable card after authoritative new
+evidence arrives.
+
+### Repository Executor Handoff
+
+For `repo_execution`, the feed thread is an orchestrator, not the implementer. Never modify the
+repository, server, document, or infrastructure target from the feed thread.
+
+After the Operator claims the item, reserve its exact identity:
+
+```bash
+tend cli work:executor-reserve \
+  --feed <feed-id> \
+  --work <work-id> \
+  --token <operator-capability-token> \
+  --repo <repo-key> \
+  --resource <resource-key> \
+  --source-fingerprint <source-fingerprint>
+```
+
+The values must match the claimed work. The reservation is idempotent for `executor:<work-id>`,
+allows no more than two active repository executors globally, and refuses a second executor for the
+same resource key. Use the second global slot only for an independent repository.
+
+Search for the deterministic task title `[Tend <work-id>] <bounded action>` before creating a task.
+Use the exact registered Codex project and repository root. Never guess a parent project or split a
+multi-repository action implicitly. Read back the created or reused task identity and cwd, then bind
+it before sending the execution envelope:
+
+```bash
+tend cli work:executor-bind \
+  --feed <feed-id> \
+  --work <work-id> \
+  --token <operator-capability-token> \
+  --task <executor-task-id> \
+  --project <exact-project-id> \
+  --cwd <absolute-repo-root>
+```
+
+Binding invalidates the Operator's execution capability. The executor task must claim the binding
+before any mutation:
+
+```bash
+tend cli work:executor-claim \
+  --feed <feed-id> \
+  --work <work-id> \
+  --task <executor-task-id>
+```
+
+The executor follows repository instructions, performs the bounded work, verifies it, and updates
+canonical repository records. Every material execution must update its session log. Update project
+status when state changed, a decision record when consequential reasoning changed, and a handoff
+when work remains. Tend records a structured receipt with repo-relative changed targets, those
+canonical records, verification, and external effects; it is the workflow index, not a replacement
+for repository history.
+
+Complete with `result.receipt` matching `ExecutorReceipt` in `docs/AGENT_CONTRACT.md`. A waiting
+outcome carries the next waiting state. A blocked or failed outcome carries blocker ownership and
+the unblock action. Missing receipt, session record, identity match, or verification keeps the work
+from completing.
+
+Use `work:block --result <json>` with a schema-v1 blocked or failed executor receipt for an
+unrecoverable repository attempt, and `work:retry` after the blocker clears. `work:fail` is only for
+non-repository work; it cannot bypass repository receipt validation.
+Retry always returns work to the same bound task. Clarifications and missing-record corrections also
+continue there. Never create a replacement merely because a response was delayed; recover from the
+durable binding and deterministic title first.
+
 ## Claude Lane
 
 Feeds can route work to a Claude Code session alongside the Codex home thread. The routing is
@@ -244,6 +319,59 @@ shell-significant text.
 ```bash
 tend cli card:upsert --feed <feed-id> --card-file <local-json-file>
 ```
+
+Use a card attention state when unresolved work has no useful user action now:
+
+```json
+{
+  "attentionState": {
+    "kind": "waiting",
+    "waitingOn": "Named person or event",
+    "resumeWhen": "Authoritative condition that creates a useful next action",
+    "since": "2026-07-16T08:00:00.000Z",
+    "recheckAt": "2026-07-20T08:00:00.000Z",
+    "lastCompletedAction": "What already happened"
+  }
+}
+```
+
+```json
+{
+  "attentionState": {
+    "kind": "blocked",
+    "blocker": "Concrete failure or missing prerequisite",
+    "unblockOwner": "Person or system that owns resolution",
+    "unblockAction": "Exact action that removes the blocker",
+    "since": "2026-07-16T08:00:00.000Z"
+  }
+}
+```
+
+Waiting and blocked cards keep their stable ids but do not appear in **To review**. Never attach an
+attention state to a queued, working, or done card. Legacy `approved_blocked` cards remain in the
+Blocked lane and retain approved-action reconciliation behavior.
+
+Author material repository work as an explicit card action:
+
+```json
+{
+  "actions": [{
+    "id": "implement-bounded-change",
+    "label": "Implement",
+    "behavior": "delegate_repo_task",
+    "instruction": "Implement and verify the bounded approved change.",
+    "execution": {
+      "repoKey": "exact-repository-key",
+      "resourceKey": "repo:exact-repository-key",
+      "sourceFingerprint": "current-source-digest"
+    },
+    "variant": "primary"
+  }]
+}
+```
+
+All execution fields are required. Repeated approval of the same action and source fingerprint
+returns its existing active work item; a newer source fingerprint supersedes only unstarted work.
 
 Card block payloads are validated before Tend writes them. Use `text` for `memo` and `receipt`
 blocks, `items` for `evidence`, `options`, and `checklist`, and Markdown link syntax inside receipt

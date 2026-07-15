@@ -232,6 +232,12 @@ export function formatWorkClaimOutput(feedId: string, work: WorkClaimResult, con
     operatorGuidance.postActionRule = 'Complete with `--result \'{"response":"...","postAction":{"cleanup":{"status":"completed","detail":"fresh verification evidence"},"disposition":"done"}}\'`. Use cleanup status `not_required` only when the user asked to preserve the source or the configured cleanup genuinely does not apply. If the main action succeeded but cleanup failed, use status `blocked`; Tend will preserve the successful action and require `work:reconcile-approved` after retrying cleanup, rather than repeating the main action. Use disposition `review` only when a concrete next step remains.';
   }
 
+  if (work.kind === "repo_execution") {
+    operatorGuidance.requiredWriteBack = "The feed Operator must not execute this material work. Reserve the exact repo/resource/source identity, create or reuse the deterministic repo-scoped Codex task, read back its identity and cwd, then bind it with work:executor-bind before sending the execution envelope.";
+    operatorGuidance.completionPrerequisite = "Only the bound executor task may claim this work. Keep the card Working until that task returns a valid executor receipt with repo-relative changed targets, canonical repo records including SESSION_LOG.md, and concrete verification evidence.";
+    operatorGuidance.postActionRule = "Retry, clarification, and missing-record corrections must continue in the same bound executor task. Never create a replacement unless reconciliation proves the original has no live owner and the replacement is explicitly fenced.";
+  }
+
   if (work.intent === "sweep_rejudge") {
     operatorGuidance.requiredWriteBack = "Run `tend cli sweep:rejudge --feed <feed> --feedback <feedbackId> --ordered-cards <json-array-of-original-visible-card-ids> --removed-cards <json-array-of-original-visible-card-ids>` before `work:complete`.";
     operatorGuidance.completionPrerequisite = "The rejudge must account for the feedback trace's original visibleCardIds exactly once. Do not include cards created while handling this work unless they were already in visibleCardIds.";

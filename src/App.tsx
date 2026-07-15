@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { api, post } from "./app/api";
 import { agentLabel, effectiveWorkLane } from "../shared/lanes";
-import type { AttentionScreen, Inspector, Tab, WorkspaceTab } from "./app/types";
+import { emptyFeedMessage, FEED_TAB_LABELS, FEED_TABS, type AttentionScreen, type Inspector, type Tab, type WorkspaceTab } from "./app/types";
 import { CardView } from "./feed/CardView";
 import { RoutineActionGroupView } from "./feed/RoutineActionGroupView";
 import { countFor, visibleCardActions, visibleCards, visibleFeedWork, visibleRoutineActions } from "./feed/selectors";
@@ -110,6 +110,11 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
   }, [canRouteDockToClaude]);
   const cards = useMemo(() => feed ? visibleCards(feed, tab) : [], [feed, tab]);
   const routineActions = useMemo(() => feed ? visibleRoutineActions(feed, tab) : [], [feed, tab]);
+  const blockedWorkByCardId = useMemo(() => new Map(
+    (feed?.work ?? [])
+      .filter((work) => work.status === "blocked")
+      .map((work) => [work.cardId, work]),
+  ), [feed]);
   const cardIds = useMemo(() => cards.map((card) => card.id), [cards]);
   const { activeCardId, setActiveCardId, navTo } = useActiveCard(pageRef, cardIds);
   const activeCard = cards.find((card) => card.id === activeCardId) ?? cards[0];
@@ -350,6 +355,14 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
     () => post(`/api/feeds/${card.feedId}/cards/${card.id}/return-to-review`),
     card.status === "queued" ? "Moved back to review" : "Ready for review again",
   );
+  const checkAttention = (card: Card) => void withRefresh(
+    () => post(`/api/feeds/${card.feedId}/cards/${card.id}/check-attention`),
+    card.attentionState?.kind === "waiting" ? "Check queued for Codex" : "Blocker check queued for Codex",
+  );
+  const retryBlocked = (work: WorkItemView) => void withRefresh(
+    () => post(`/api/feeds/${work.feedId}/work/${work.id}/retry`),
+    "Retry queued in the existing executor task",
+  );
   const undoCardDispositionAction = (target: CardDispositionUndo) => void (async () => {
     try {
       await post(cardDispositionUndoPath(target.kind, target));
@@ -426,9 +439,9 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
     <>
       <TopBar state={state} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
       <nav className="tabs">
-        {(["review", "queued", "working", "done"] as Tab[]).map((item) => (
+        {FEED_TABS.map((item) => (
           <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>
-            {item === "review" ? "To review" : item === "queued" ? queuedTabLabel : item === "working" ? "Working" : "Done"}
+            {item === "queued" ? queuedTabLabel : FEED_TAB_LABELS[item]}
             <span>{countFor(feed, item)}</span>
           </button>
         ))}
@@ -442,7 +455,23 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
         {cards.map((card, index) => (
           <Fragment key={card.id}>
             {tab === "review" && index === updated.length && fresh.length > 0 && <div className="section-label" key={`${card.id}-label`}>New <span>{fresh.length}</span></div>}
-            <CardView key={card.id} card={card} queuedFor={cardQueuedFor(card.id)} queuedNote={editableQueuedNote(card)} active={card.id === activeCard?.id} onActivate={() => setActiveCardId(card.id)} onChanged={() => void refresh()} onAction={(action) => runCardAction(card, action)} onReturnToReview={() => returnToReview(card)} />
+            <CardView
+              key={card.id}
+              card={card}
+              queuedFor={cardQueuedFor(card.id)}
+              queuedNote={editableQueuedNote(card)}
+              active={card.id === activeCard?.id}
+              onActivate={() => setActiveCardId(card.id)}
+              onChanged={() => void refresh()}
+              onAction={(action) => runCardAction(card, action)}
+              onReturnToReview={() => returnToReview(card)}
+              onCheckAttention={() => checkAttention(card)}
+              onRetryBlocked={() => {
+                const work = blockedWorkByCardId.get(card.id);
+                if (work) retryBlocked(work);
+              }}
+              canRetryBlocked={blockedWorkByCardId.has(card.id)}
+            />
           </Fragment>
         ))}
         {feedWork.map((work) => (
@@ -457,7 +486,9 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
                 ? `Ready for ${workAgentLabel(work)} to drain.`
                 : work.status === "working"
                   ? `${workAgentLabel(work)} is working through this feed-level instruction.`
-                  : `${workAgentLabel(work)} completed this feed-level instruction.`}
+                  : work.status === "blocked" || work.status === "approved_blocked"
+                    ? work.error ?? `${workAgentLabel(work)} could not complete this feed-level instruction.`
+                    : `${workAgentLabel(work)} completed this feed-level instruction.`}
             </p>
             {work.status === "queued" && workAgent(work) === "claude" && claudeLiveness === "offline" && (
               <div className="parked-work">
@@ -495,9 +526,17 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
                 </div>
               </footer>
             )}
+            {(work.status === "blocked" || work.status === "approved_blocked") && (
+              <footer className="card-action">
+                <div>
+                  <span className="action-label">Blocked</span>
+                  <b>{work.error ?? "Needs an unblock action before it can continue."}</b>
+                </div>
+              </footer>
+            )}
           </article>
         ))}
-        {!cards.length && !routineActions.length && !feedWork.length && <div className="empty"><h2>Nothing here right now.</h2><p>{tab === "review" ? "A quiet feed is allowed. Wake the feed thread when you want Codex to collect or drain pending work." : "Move back to To review when you are ready for the next pass."}</p></div>}
+        {!cards.length && !routineActions.length && !feedWork.length && <div className="empty"><h2>Nothing here right now.</h2><p>{emptyFeedMessage(tab)}</p></div>}
         {(feed.readyNextPass > 0 || compoundProposals.length > 0) && <section className={`end-cap ${feed.readyNextPass ? "" : "actions-only"}`}>
           {feed.readyNextPass > 0 && <div>
             <span>End of this pass</span>

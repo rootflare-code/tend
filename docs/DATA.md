@@ -21,14 +21,16 @@ ATTENTION_HOME=/path/to/attention tend start
 - `attention.db` stores local runtime metadata, active workspace feed membership, editable prompt/policy documents, feed cards, routine action groups, source recipes/checkpoints, source run records, sweep state/artifacts, revision records, feed audit events, and queued/claimed/completed work items.
 - `data/workspace.json` mirrors active feed membership for backup compatibility and migration from older local installs.
 - `data/global-policy.md`, `data/prompts/*.md`, `data/feeds/*/policy.md`, and `data/feeds/*/prompts/*.md` mirror editable prompt/policy documents for backup compatibility and readable local debugging.
-- `data/feeds/*/cards/*.json` mirrors feed cards for backup compatibility and readable local debugging.
+- `data/feeds/*/cards/*.json` mirrors feed cards, including optional waiting or blocked attention
+  state, for backup compatibility and readable local debugging.
 - `data/feeds/*/routine-actions/*.json` mirrors routine action groups for backup compatibility and readable local debugging.
 - `data/feeds/*/sources.json`, `data/feeds/*/sources/*.md`, and `data/feeds/*/checkpoints/*.json` mirror source recipes and checkpoints.
 - `data/feeds/*/runs/*.json` mirrors source run records for backup compatibility and readable local debugging.
 - `data/feeds/*/sweep-state.json`, `data/feeds/*/sweeps/*.json`, and `data/feeds/*/sweep-feedback/*.json` mirror sweep state, batches, and feedback traces.
 - `data/revision-proposals/*.json`, `data/workspace-revisions/*.json`, and `data/feeds/*/policy-revisions/*.json` mirror revision records.
 - `data/feeds/*/events.jsonl` mirrors feed audit events for backup compatibility and readable local debugging.
-- `data/feeds/*/work/*.json` mirrors work items for backup compatibility and readable local debugging.
+- `data/feeds/*/work/*.json` mirrors work items, including repository executor bindings and
+  structured receipts, for backup compatibility and readable local debugging.
 - `data/feeds/*/feed.md` stores a readable feed description. `data/feeds/*/raw/**` stores immutable raw evidence snapshots.
 - `data/agents/claude/presence.json`, `data/agents/claude/wake-state.json`, and `data/agents/claude/wake.jsonl` store Claude-lane operational state. Wake lines contain only server-controlled ids/counts and never source text, instructions, or capability tokens.
 - `data/mind-context/binding.json` mirrors the one bound Chronicle publisher.
@@ -67,3 +69,7 @@ Import first copies the backup into a temporary staging directory. Tend refuses 
 the same runtime home is active, then swaps the staged database and data into place with rollback if
 the swap fails. Older data-directory-only backups are still accepted; the next local runtime start
 rehydrates `attention.db` from those imported file mirrors.
+
+Older binaries do not implement waiting, blocked, or repository-executor workflow semantics. After
+a newer runtime writes those records, rollback requires restoring a pre-upgrade backup together
+with the older binary. Pointing only the older binary at newer runtime data is unsupported.

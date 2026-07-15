@@ -129,11 +129,12 @@ export function apiRoutes(context: LocalRouteContext): Hono {
     const result = input.result && typeof input.result === "object" ? input.result as { response: string; done?: boolean; postAction?: PostActionCompletion } : { response: "" };
     return domain.reconcileApprovedWork(c.req.param("feed"), c.req.param("work"), String(input.token ?? ""), result);
   }));
-  app.post("/api/feeds/:feed/work/:work/retry", async (c) => mutation(c, notify, async () => domain.retryApprovedWork(c.req.param("feed"), c.req.param("work"))));
+  app.post("/api/feeds/:feed/work/:work/retry", async (c) => mutation(c, notify, async () => domain.retryWork(c.req.param("feed"), c.req.param("work"))));
   app.post("/api/feeds/:feed/routine-actions/:group/approve", async (c) => mutation(c, notify, async () => domain.approveRoutineActionGroup(c.req.param("feed"), c.req.param("group"))));
   app.post("/api/feeds/:feed/cards/:card/actions/:action", async (c) => mutation(c, notify, async () => domain.runCardAction(c.req.param("feed"), c.req.param("card"), c.req.param("action"))));
   app.post("/api/feeds/:feed/cards/:card/approve", async (c) => mutation(c, notify, async () => domain.approveAction(c.req.param("feed"), c.req.param("card"))));
   app.post("/api/feeds/:feed/cards/:card/dismiss", async (c) => mutation(c, notify, async () => domain.dismissCard(c.req.param("feed"), c.req.param("card"))));
+  app.post("/api/feeds/:feed/cards/:card/check-attention", async (c) => mutation(c, notify, async () => domain.queueAttentionCheck(c.req.param("feed"), c.req.param("card"))));
   app.post("/api/feeds/:feed/cards/:card/cleanup-source", async (c) => mutation(c, notify, async () => domain.queueSourceCleanup(c.req.param("feed"), c.req.param("card"))));
   app.post("/api/feeds/:feed/cards/:card/undo-cleanup-source", async (c) => mutation(c, notify, async () => domain.undoSourceCleanup(c.req.param("feed"), c.req.param("card"))));
   app.post("/api/feeds/:feed/cards/:card/return-to-review", async (c) => mutation(c, notify, async () => domain.returnCardToReview(c.req.param("feed"), c.req.param("card"))));

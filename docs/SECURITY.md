@@ -29,6 +29,12 @@ they are not a substitute for keeping the listener on loopback.
   activates an agent session must not carry source-derived bytes.
 - Agent presence is informational only. It lights the UI chip and triggers wake replay for
   parked work; it never authorizes claims, completions, or external mutations.
+- Repository executor task ids are lane credentials inside the same trusted-local boundary. Binding
+  rotates away the Operator's work capability and only the exact bound task id can mint the executor
+  capability, which prevents accidental cross-task claims. Tend cannot attest the calling Codex task
+  at the localhost CLI boundary, so this is not a defense against a malicious same-account process
+  that already knows the bound task id. Exact project/cwd resolution remains an Operator obligation
+  against the reviewed private registry; Tend never stores that personal registry in the product.
 
 ## On Your Mind
 

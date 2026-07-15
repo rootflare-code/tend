@@ -1,7 +1,7 @@
 export type FeedId = string;
 export type CardStatus = "to_review_new" | "to_review_updated" | "queued" | "working" | "approved_blocked" | "done";
 export type CardKind = "attention" | "feed_improvement";
-export type WorkStatus = "queued" | "working" | "approved_blocked" | "completed" | "failed" | "stale" | "cancelled";
+export type WorkStatus = "queued" | "working" | "blocked" | "approved_blocked" | "completed" | "failed" | "stale" | "cancelled";
 export type WorkAgent = "codex" | "claude";
 export type RoutineActionStatus = "proposed" | "queued" | "working" | "completed" | "failed" | "stale";
 export type MindContextPublicationState = "fresh" | "stale" | "unavailable";
@@ -161,17 +161,42 @@ export interface ProposedAction {
   mailboxPolicy?: "reply_from_source";
 }
 
+export type CardAttentionState =
+  | {
+      kind: "waiting";
+      waitingOn: string;
+      resumeWhen: string;
+      since: string;
+      recheckAt?: string;
+      lastCompletedAction?: string;
+    }
+  | {
+      kind: "blocked";
+      blocker: string;
+      unblockOwner: string;
+      unblockAction: string;
+      since: string;
+      lastVerifiedEvidence?: string;
+    };
+
+export interface RepoExecutionTarget {
+  repoKey: string;
+  resourceKey: string;
+  sourceFingerprint: string;
+}
+
 export interface CardAction {
   id: string;
   label: string;
   // "default_cleanup" runs the feed's configured source cleanup (an external connector mutation,
   // e.g. archiving the source email). "dismiss_card" removes the card from review locally and
   // performs no source mutation. They are deliberately distinct dispositions.
-  behavior: "queue_instruction" | "approve_action" | "default_cleanup" | "dismiss_card";
+  behavior: "queue_instruction" | "delegate_repo_task" | "approve_action" | "default_cleanup" | "dismiss_card";
   instruction?: string;
   artifactBlockId?: string;
   externalMutation?: boolean;
   mailboxPolicy?: "reply_from_source";
+  execution?: RepoExecutionTarget;
   variant?: "primary" | "secondary";
   shortcut?: string;
 }
@@ -301,6 +326,7 @@ export interface Card {
   feedId: FeedId;
   kind: CardKind;
   status: CardStatus;
+  attentionState?: CardAttentionState;
   title: string;
   eyebrow: string;
   why: string;
@@ -361,7 +387,7 @@ export interface WorkItem {
   id: string;
   feedId: FeedId;
   cardId: string;
-  kind: "instruction" | "scoped_instruction" | "execute_approved_action" | "default_cleanup" | "routine_action_batch" | "compound_learnings";
+  kind: "instruction" | "scoped_instruction" | "repo_execution" | "execute_approved_action" | "default_cleanup" | "routine_action_batch" | "compound_learnings";
   instruction: string;
   assignee?: WorkAgent;
   claimedBy?: WorkClaimant;
@@ -375,6 +401,14 @@ export interface WorkItem {
   approvalDigest?: string;
   completionCleanup?: string;
   cardActionId?: string;
+  repoKey?: string;
+  resourceKey?: string;
+  sourceFingerprint?: string;
+  previousAttentionState?: CardAttentionState;
+  executor?: ExecutorBinding;
+  executorReceipt?: ExecutorReceipt;
+  continuationOf?: string;
+  supersedes?: string;
   routineActionGroupId?: string;
   createdAt: string;
   updatedAt: string;
@@ -387,6 +421,45 @@ export interface WorkItem {
   verifiedApprovalDigest?: string;
   verifiedMailbox?: string;
   sourceMobileCommandId?: string;
+}
+
+export interface ExecutorBinding {
+  state: "reserved" | "bound" | "claimed";
+  idempotencyKey: string;
+  repoKey: string;
+  resourceKey: string;
+  sourceFingerprint: string;
+  reservationCapabilityDigest: string;
+  reservedAt: string;
+  taskId?: string;
+  projectId?: string;
+  cwd?: string;
+  boundAt?: string;
+  claimedAt?: string;
+}
+
+export type ExecutorOutcome = "completed" | "needs_review" | "waiting" | "blocked" | "failed";
+
+export interface ExecutorReceipt {
+  schemaVersion: string;
+  workId: string;
+  cardId: string;
+  executorTaskId: string;
+  repoKey: string;
+  outcome: ExecutorOutcome;
+  summary: string;
+  changedTargets: Array<{ path: string; reason: string }>;
+  canonicalRecords: Array<{
+    kind: "status" | "decision" | "session" | "handoff" | "qa" | "git" | "artifact";
+    ref: string;
+    result: "updated" | "not_applicable";
+    reason?: string;
+  }>;
+  verification: Array<{ check: string; result: "passed" | "failed"; evidence: string }>;
+  externalEffects: Array<{ system: string; effectId: string }>;
+  remainingTrigger?: string;
+  blocker?: { owner: string; reason: string; unblockAction: string };
+  attentionState?: CardAttentionState;
 }
 
 export type WorkItemView = Omit<WorkItem, "capabilityToken">;

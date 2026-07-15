@@ -182,9 +182,13 @@ Cards are interactive work packets, not fixed summaries. Depending on the work, 
 evidence, editable drafts, options, checklists, diffs, email threads, profiles, charts, and
 completion receipts.
 
+Each feed separates current action from unresolved state across six lanes: **To review**, **Queued
+for Codex**, **Working**, **Waiting**, **Blocked**, and **Done**. Waiting and blocked cards remain
+visible without asking for judgment before a useful action exists.
+
 ### One Thread per Feed
 
-Each feed has exactly two operating surfaces:
+Each feed has two primary operating surfaces:
 
 1. **Tend in the in-app browser**: review cards, approve actions, edit configuration, give
    feedback, and inspect results.
@@ -192,6 +196,11 @@ Each feed has exactly two operating surfaces:
    feed heartbeat.
 
 Do not reuse one Codex thread across several feeds. One thread owns one feed.
+
+For an approved material repository action, the feed thread remains a thin Operator. It creates or
+reuses one repo-scoped Codex task, binds the exact work to that task, and monitors its structured
+receipt. The repo task performs the change and updates the repository's own status, decision,
+session, handoff, and verification records as applicable.
 
 ```mermaid
 flowchart LR

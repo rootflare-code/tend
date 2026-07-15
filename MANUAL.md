@@ -109,12 +109,19 @@ Use this when:
 
 ## Reviewing A Feed
 
-The feed is divided into four tabs:
+The feed is divided into six tabs:
 
-- **To review** - new cards, updated cards, and proposed routine actions
+- **To review** - cards where you can make a useful decision, approval, review, or clarification now
 - **Queued for Codex** - instructions or approvals waiting for the home thread
 - **Working** - work currently claimed by the home thread
+- **Waiting** - cards waiting on another person, event, dependency, or future date
+- **Blocked** - cards and work stopped by a failure, missing access, or unresolved prerequisite
 - **Done** - completed cards, instructions, and routine actions
+
+Active queued or working work takes precedence over a card's attention state. A card with no active
+work appears in **Waiting** or **Blocked** when it carries that state, and only cards with no
+attention state can appear in **To review** or **Done**. Older `approved_blocked` actions appear in
+**Blocked** and keep their existing retry semantics.
 
 ### Cards
 
@@ -184,6 +191,37 @@ Choose **Review ready cards** to begin the next pass. Updated cards appear under
 
 A quiet feed is valid. Tend's global policy explicitly prefers no card over a weak card.
 
+### Waiting And Blocked Cards
+
+Use **Waiting** when no useful action is available now because another person, event, dependency,
+or date owns the next trigger. A waiting card records:
+
+- who or what it is waiting on
+- the condition that should resume review
+- when the wait began
+- an optional next-check time
+- an optional description of the action already completed
+
+Use **Blocked** when work cannot progress because of a concrete failure, missing access, unresolved
+ownership, or prerequisite. A blocked card records the blocker, the unblock owner, the exact
+unblock action, when the block began, and optional last verified evidence.
+
+Held cards remain visible without inflating **To review**. Waiting cards always offer **Check now**,
+**Move to review**, and **Dismiss card**. Blocked cards always offer **Resolve blocker**,
+**Move to review**, and **Dismiss card**; **Retry** appears when retryable blocked work exists. Tend
+does not promote an old Archive proposal into the required next action while a card is held.
+
+A feed runner evaluates due waits with:
+
+```sh
+./tend cli card:evaluate-triggers --feed <feed-id>
+```
+
+Use `--now <ISO-timestamp>` only for deterministic testing or controlled replay. A due
+`recheckAt` moves the same card to **To review** once. An unchanged source run, routine heartbeat,
+or timestamp-only update must not reopen it. A named response or authoritative source change may
+instead move the same card to review or done when the feed writes the newly judged state.
+
 ## Steering With The Dock
 
 The Dock stays at the bottom of feed and configuration screens. Type an instruction, or use the
@@ -229,7 +267,7 @@ Choose the feed when the instruction concerns its broader job:
 Summarize what this feed learned about which security reports deserve immediate attention.
 ```
 
-Feed-level work appears in the queued, working, and done tabs alongside card work.
+Feed-level work appears in the queued, working, blocked, and done tabs alongside card work.
 
 ### Configuration Scope
 
@@ -334,6 +372,28 @@ remaining cleanup. It must not repeat the already successful action.
 
 The card history records user instructions, approvals, edits, cancellations, Codex results, stale
 approvals, retries, and reconciliation.
+
+### Repository Execution
+
+A card can offer a repository-scoped action for material implementation or review. Clicking it
+queues `repo_execution` work. The feed's home thread is then an Operator only: it must reserve the
+exact repository and resource, create or reuse one deterministic Codex task in that repository,
+bind the task, and monitor the result. It must not perform the material change itself.
+
+Only the bound task can claim or complete the work. Tend allows at most two active repository
+executors across the workspace, and never more than one for the same resource key. The second slot
+is for an independent repository, not parallel work in the same repository. Clarifications, retries,
+and missing-record corrections return to the same bound task rather than creating a new one.
+
+Completion requires a structured receipt that identifies the work, card, task, and repository;
+lists repo-relative changed targets; records verification and external effects; and links the
+repository's canonical status, decision, session, handoff, QA, git, or artifact records. Every
+material repository execution must update a session record. Absolute filesystem paths and parent
+directory traversal are rejected. Changed targets must be repository-relative. Record links may be
+repository-relative, a Tend `/api/artifacts/` path, or an HTTPS GitHub URL.
+
+Tend is the operational audit and workflow index. Repository-owned artifacts and records remain
+the source of truth for what changed and why.
 
 ## Learning And Compounding
 
@@ -461,12 +521,13 @@ Use foreground mode while debugging:
 2. Open **Prompts & sources** and inspect **Home thread**.
 3. Confirm the expected thread is bound and its heartbeat is installed.
 4. Open or wake that same thread and say `go deal with the feed`.
-5. Check **Queued for Codex**, **Working**, and **Done** for pending or failed work.
+5. Check **Queued for Codex**, **Working**, **Waiting**, **Blocked**, and **Done** for pending, held,
+   failed, or completed work.
 6. Inspect `./tend logs` if the runtime itself is unhealthy.
 
 Do not start another server or bind a replacement thread merely because a healthy feed is quiet.
 
-### When Work Is Waiting
+### When Queued Work Is Waiting
 
 Queued work is drained by the feed's bound thread. Wake that exact thread rather than using another
 feed thread. A thread cannot claim work owned by a different feed unless the operator explicitly
@@ -510,6 +571,11 @@ Exports require a new destination and never overwrite or delete an existing path
 validate the backup before replacing current data, and Tend refuses to import while the same runtime
 is active.
 
+Attention states and repository-executor bindings are additive records, but older Tend binaries do
+not understand their workflow semantics. After a newer runtime has written waiting, blocked, or
+executor state, rolling back requires both the older binary and a backup exported before the
+upgrade. Relinking an older binary against the newer runtime data is unsupported.
+
 See [docs/DATA.md](./docs/DATA.md) for the complete storage map.
 
 ## iPhone Review Client
@@ -528,6 +594,8 @@ The phone can:
 
 The Mac remains authoritative. The phone does not run Codex or store connector credentials. It reads
 a private Supabase projection and submits commands that the local Tend runtime validates again.
+Waiting and blocked cards are excluded from the phone's review queue, and repository delegation is
+not a phone action. Use the browser to inspect held cards or start repository work.
 
 See [docs/IOS.md](./docs/IOS.md) for setup and device validation.
 

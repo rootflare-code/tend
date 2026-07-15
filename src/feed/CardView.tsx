@@ -274,6 +274,9 @@ export function CardView({
   onChanged,
   onAction,
   onReturnToReview,
+  onCheckAttention = () => {},
+  onRetryBlocked = () => {},
+  canRetryBlocked = false,
   queuedFor,
 }: {
   card: Card;
@@ -283,9 +286,15 @@ export function CardView({
   onChanged: () => void;
   onAction: (action: CardAction) => void;
   onReturnToReview: () => void;
+  onCheckAttention?: () => void;
+  onRetryBlocked?: () => void;
+  canRetryBlocked?: boolean;
   queuedFor?: string;
 }) {
   const actions = visibleCardActions(card);
+  const attentionState = card.status === "queued" || card.status === "working" || card.status === "approved_blocked"
+    ? undefined
+    : card.attentionState;
   const nextThing = card.proposedAction?.label === "Decide disposition"
     ? "Dismiss, or tell Codex what to do"
     : card.proposedAction?.label ?? actions.find((action) => action.variant === "primary")?.label ?? actions[0]?.label;
@@ -304,6 +313,24 @@ export function CardView({
       <div className="blocks">
         {card.blocks.map((block) => <Block key={block.id} feedId={card.feedId} cardId={card.id} block={block} onChanged={onChanged} />)}
       </div>
+      {attentionState?.kind === "waiting" && (
+        <section className="attention-state attention-state-waiting">
+          {attentionState.lastCompletedAction && <div><span className="action-label">Already done</span><b>{attentionState.lastCompletedAction}</b></div>}
+          <div><span className="action-label">Waiting on</span><b>{attentionState.waitingOn}</b></div>
+          <div><span className="action-label">Resume when</span><b>{attentionState.resumeWhen}</b></div>
+          <div><span className="action-label">Waiting since</span><b>{formatAttentionDate(attentionState.since)}</b></div>
+          {attentionState.recheckAt && <div><span className="action-label">Next check</span><b>{formatAttentionDate(attentionState.recheckAt)}</b></div>}
+        </section>
+      )}
+      {attentionState?.kind === "blocked" && (
+        <section className="attention-state attention-state-blocked">
+          <div><span className="action-label">Blocked by</span><b>{attentionState.blocker}</b></div>
+          <div><span className="action-label">Unblock owner</span><b>{attentionState.unblockOwner}</b></div>
+          <div><span className="action-label">Unblock action</span><b>{attentionState.unblockAction}</b></div>
+          {attentionState.lastVerifiedEvidence && <div><span className="action-label">Last verified evidence</span><b>{attentionState.lastVerifiedEvidence}</b></div>}
+          <div><span className="action-label">Blocked since</span><b>{formatAttentionDate(attentionState.since)}</b></div>
+        </section>
+      )}
       {queuedNote && <QueuedNoteEditor work={queuedNote} onChanged={onChanged} />}
       <CardHistory card={card} />
       {card.status === "approved_blocked" && (
@@ -315,7 +342,7 @@ export function CardView({
           </div>
         </footer>
       )}
-      {actions.length > 0 && (card.status === "to_review_new" || card.status === "to_review_updated") && (
+      {actions.length > 0 && !attentionState && (card.status === "to_review_new" || card.status === "to_review_updated") && (
         <footer className="card-action">
           <div>
             <span className="action-label">Next thing</span>
@@ -338,7 +365,38 @@ export function CardView({
           </div>
         </footer>
       )}
-      {(card.status === "queued" || card.status === "done") && (
+      {attentionState && actions.length > 0 && (
+        <footer className="card-action attention-state-actions">
+          <div><span className="action-label">Available actions</span></div>
+          <div className="action-buttons">
+            {(attentionState.kind === "waiting" || !canRetryBlocked) && (
+              <button className="button ghost" onClick={(event) => { event.stopPropagation(); onCheckAttention(); }}>
+                {attentionState.kind === "waiting" ? "Check now" : "Resolve blocker"}
+              </button>
+            )}
+            {attentionState.kind === "blocked" && canRetryBlocked && (
+              <button className="button ghost" onClick={(event) => { event.stopPropagation(); onRetryBlocked(); }}>
+                Retry
+              </button>
+            )}
+            {actions.map((action) => (
+              <button
+                aria-label={action.label}
+                className="button ghost"
+                key={action.id}
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={(event) => { event.stopPropagation(); onAction(action); }}
+              >
+                {action.label}
+              </button>
+            ))}
+            <button className="button ghost" onClick={(event) => { event.stopPropagation(); onReturnToReview(); }}>
+              Move to review
+            </button>
+          </div>
+        </footer>
+      )}
+      {(card.status === "queued" || (card.status === "done" && !attentionState)) && (
         <footer className="card-action">
           <div>
             <span className="action-label">{card.status === "queued" ? `Queued for ${queuedFor ?? "Codex"}` : "Done"}</span>
@@ -353,4 +411,9 @@ export function CardView({
       )}
     </article>
   );
+}
+
+function formatAttentionDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }

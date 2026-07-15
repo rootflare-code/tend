@@ -9,7 +9,7 @@ import type {
   RoutineActionGroup,
   WorkItemView,
 } from "../../shared/types";
-import { safeConfiguredCardActions } from "../../shared/cardActions";
+import { visibleCardActions } from "../../shared/cardActions";
 import {
   MOBILE_SCHEMA_VERSION,
   type MobileActionConfirmation,
@@ -26,7 +26,8 @@ import type { AttentionStore } from "../store";
 import { digest, isoNow } from "../util";
 import { actionDigest, cleanupDigest, routineActionDigest } from "../workflow/approvals";
 
-const ACTIVE_WORK_STATUSES = new Set(["queued", "working", "approved_blocked"]);
+const ACTIVE_WORK_STATUSES = new Set(["queued", "working", "blocked", "approved_blocked"]);
+type MobileProjectableCardAction = CardAction & { behavior: MobileActionProjection["behavior"] };
 
 export async function projectMobileWorkspace(store: AttentionStore, now = new Date()): Promise<MobileWorkspaceSnapshot> {
   const feedIds = await store.listFeedIds();
@@ -104,7 +105,7 @@ function projectFeedItems(feed: FeedView): MobileCardProjection[] {
 
 function projectCard(feed: FeedView, card: Card, generation: string, reviewIndex: number): MobileCardProjection {
   const reviewable = isReviewableCard(feed, card);
-  const actions = visibleCardActions(card).map((action) => projectCardAction(feed, card, action));
+  const actions = visibleCardActions(card).filter(isMobileProjectableCardAction).map((action) => projectCardAction(feed, card, action));
   const activeWork = latestActiveWork(feed.work, card.id);
   const base = {
     key: `${feed.config.id}:${card.id}`,
@@ -181,7 +182,7 @@ function projectRoutineGroup(
   return { ...base, cardDigest: digest(base) };
 }
 
-function projectCardAction(feed: FeedView, card: Card, action: CardAction): MobileActionProjection {
+function projectCardAction(feed: FeedView, card: Card, action: MobileProjectableCardAction): MobileActionProjection {
   const proposed = action.behavior === "approve_action" && action.instruction
     ? {
         label: action.label,
@@ -208,43 +209,13 @@ function projectCardAction(feed: FeedView, card: Card, action: CardAction): Mobi
   };
 }
 
-function visibleCardActions(card: Card): CardAction[] {
-  const dismiss: CardAction = {
-    id: "dismiss-card",
-    label: "Dismiss card",
-    behavior: "dismiss_card",
-    variant: "secondary",
-    shortcut: "d",
-  };
-  const configuredActions = safeConfiguredCardActions(card.actions);
-  if (configuredActions.length) {
-    // Local dismissal is always available unless the card author supplied a custom local-dismiss
-    // control. Source cleanup remains a separate, explicitly configured action.
-    return configuredActions.some((action) => action.behavior === "dismiss_card") ? configuredActions : [dismiss, ...configuredActions];
-  }
-  if (!card.proposedAction || card.proposedAction.label === "Decide disposition") return [dismiss];
-  if (card.proposedAction.label === "Archive" || card.proposedAction.label === "Archive this thread") {
-    // The card explicitly proposes archiving the source, so surface the connector cleanup.
-    return [dismiss, { id: "default-cleanup", label: "Archive", behavior: "default_cleanup", variant: "primary", shortcut: "x" }];
-  }
-  return [
-    dismiss,
-    {
-      id: "proposed-action",
-      label: card.proposedAction.label,
-      behavior: "approve_action",
-      instruction: card.proposedAction.instruction,
-      artifactBlockId: card.proposedAction.artifactBlockId,
-      externalMutation: card.proposedAction.externalMutation,
-      mailboxPolicy: card.proposedAction.mailboxPolicy,
-      variant: "primary",
-      shortcut: "a",
-    },
-  ];
+function isMobileProjectableCardAction(action: CardAction): action is MobileProjectableCardAction {
+  return action.behavior !== "delegate_repo_task";
 }
 
 function isReviewableCard(feed: FeedView, card: Card): boolean {
   return (card.status === "to_review_new" || card.status === "to_review_updated")
+    && !card.attentionState
     && card.readyForPass <= feed.config.currentPass
     && !card.sweep?.hidden
     && !card.routineActionGroupId;

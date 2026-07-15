@@ -228,6 +228,9 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           required("card"),
         );
         break;
+      case "card:evaluate-triggers":
+        output = await domain.evaluateAttentionTriggers(required("feed"), value("now"));
+        break;
       case "work:list":
         {
           const feedId = required("feed");
@@ -303,12 +306,29 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           required("instruction"),
         );
         break;
+      case "work:executor-reserve":
+        output = await domain.reserveExecutor(required("feed"), required("work"), required("token"), {
+          repoKey: required("repo"),
+          resourceKey: required("resource"),
+          sourceFingerprint: required("source-fingerprint"),
+        });
+        break;
+      case "work:executor-bind":
+        output = await domain.bindExecutor(required("feed"), required("work"), required("token"), {
+          taskId: required("task"),
+          projectId: required("project"),
+          cwd: required("cwd"),
+        });
+        break;
+      case "work:executor-claim":
+        output = await domain.claimExecutor(required("feed"), required("work"), required("task"));
+        break;
       case "work:complete":
         output = await domain.completeWork(
           required("feed"),
           required("work"),
           required("token"),
-          json(required("result")),
+          await structured("result"),
         );
         break;
       case "action:verify":
@@ -327,14 +347,23 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           required("error"),
         );
         break;
-      case "work:block":
-        output = await domain.blockApprovedWork(
-          required("feed"),
-          required("work"),
-          required("token"),
-          required("error"),
-        );
+      case "work:block": {
+        const supplied = value("result") || value("result-file") ? await structured("result") : undefined;
+        const blocker = supplied?.schemaVersion && supplied?.blocker
+          ? {
+              owner: supplied.blocker.owner,
+              reason: supplied.blocker.reason,
+              unblockAction: supplied.blocker.unblockAction,
+              receipt: supplied,
+            }
+          : supplied ?? {
+              owner: value("owner") ?? "Executor",
+              reason: required("error"),
+              unblockAction: value("unblock-action") ?? "Resolve the blocker and retry this same work item.",
+            };
+        output = await domain.blockWork(required("feed"), required("work"), required("token"), blocker);
         break;
+      }
       case "work:reconcile-approved":
         output = await domain.reconcileApprovedWork(
           required("feed"),
@@ -344,7 +373,7 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
         );
         break;
       case "work:retry":
-        output = await domain.retryApprovedWork(
+        output = await domain.retryWork(
           required("feed"),
           required("work"),
         );
