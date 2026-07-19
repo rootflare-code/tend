@@ -5,6 +5,20 @@ a promise of ongoing maintenance.
 
 ## Unreleased
 
+- Add first-class **Waiting** and **Blocked** feed tabs. Card `attentionState` keeps unresolved work
+  visible without inflating **To review**, records waiting or blocker ownership, and supports
+  deterministic one-shot `recheckAt` evaluation through `card:evaluate-triggers`. Legacy
+  `approved_blocked` actions remain in the Blocked lane.
+- Add repository-scoped execution with `delegate_repo_task`, durable `repo_execution` work,
+  two-phase executor reserve/bind/claim, one active executor per resource, a global limit of two,
+  same-task retry, and structured receipts requiring canonical session records and verification.
+  The feed thread is an orchestrator and cannot complete material work after binding it to the
+  executor task.
+- Advance the CLI contract to `0.5` for attention-trigger evaluation, generic work blocking, and
+  repository executor reserve, bind, claim, same-task retry, completion, and receipt fields.
+- Exclude held cards from the iPhone review queue and exclude repository delegation from projected
+  phone actions. Older binaries require a pre-upgrade data restore after these new states are used.
+
 - Separate local card dismissal from source cleanup. `tend cli card:dismiss` now moves a reviewable
   card to `done` with no work item, approval digest, `action:verify`, or connector call, and is
   reversible with `card:return-to-review`. Explicit source cleanup moves to

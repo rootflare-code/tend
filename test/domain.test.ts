@@ -15,6 +15,7 @@ import { FileSweepRepository, MirroredSweepRepository } from "../server/reposito
 import { FileTextDocumentRepository, MirroredTextDocumentRepository } from "../server/repositories/textDocuments";
 import { FileWorkItemRepository, MirroredWorkItemRepository } from "../server/repositories/workItems";
 import { FileWorkspaceFeedRepository, MirroredWorkspaceFeedRepository } from "../server/repositories/workspaceFeeds";
+import { createLocalRuntime } from "../server/runtime";
 import { LocalSqliteStore } from "../server/sqlite";
 import { AttentionStore } from "../server/store";
 import type { Card, WorkClaimedByReport, WorkItem } from "../shared/types";
@@ -1545,6 +1546,31 @@ describe("approval, learning, and heartbeat safety", () => {
     await expect(domain.completeWork("inbox", work.id, claimed.capabilityToken, { response: "Sent." })).rejects.toThrow("Approval stale");
     expect((await store.readWork("inbox", work.id)).status).toBe("stale");
     expect((await store.readCard("inbox", "external-reply-safety-fixture")).status).toBe("to_review_updated");
+  });
+
+  test("persists the stale-completion quarantine in the transactional SQLite runtime", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "attention-test-"));
+    roots.push(root);
+    const runtime = await createLocalRuntime(path.join(root, "data"), path.join(root, "attention.db"));
+    const domain = new AttentionDomain(runtime.store);
+    await domain.upsertCard("inbox", {
+      id: "sqlite-stale-quarantine-fixture",
+      title: "Send this reply.",
+      why: "Stale quarantine writes must commit even though completion throws.",
+      sourceMailbox: "dan@every.to",
+      blocks: [{ id: "draft", type: "editable_text", label: "Draft reply", value: "Original draft.", editable: true }],
+      proposedAction: { label: "Send this reply", instruction: "Send the exact currently approved reply.", artifactBlockId: "draft", externalMutation: true, mailboxPolicy: "reply_from_source" },
+    });
+    await domain.bindFeed("inbox", "thread-inbox");
+    const work = await domain.approveAction("inbox", "sqlite-stale-quarantine-fixture");
+    const claimed = await domain.claimWork("inbox", "thread-inbox") as WorkItem;
+    await domain.verifyApprovedAction("inbox", work.id, claimed.capabilityToken, "dan@every.to");
+    await domain.updateBlock("inbox", "sqlite-stale-quarantine-fixture", "draft", "A different draft.");
+    await expect(domain.completeWork("inbox", work.id, claimed.capabilityToken, { response: "Sent." })).rejects.toThrow("Approval stale");
+    // The quarantine must survive the throw: a transaction rollback would leave this "working" and wedge the item.
+    expect((await runtime.store.readWork("inbox", work.id)).status).toBe("stale");
+    expect((await runtime.store.readCard("inbox", "sqlite-stale-quarantine-fixture")).status).toBe("to_review_updated");
+    runtime.sqlite.close();
   });
 
   test("persists editable-text changes even when an agent omitted the redundant editable flag", async () => {

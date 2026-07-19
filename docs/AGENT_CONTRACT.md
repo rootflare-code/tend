@@ -49,6 +49,13 @@ the user wants an immediate sweep.
 - When an approved action receipt includes `completionCleanup`, the same click authorizes that predictable cleanup after the main action succeeds. Perform and verify it before completion; never ask for a separate Archive click.
 - If the main action succeeds but bundled cleanup fails, report cleanup status `blocked`. Retry only cleanup, then use `work:reconcile-approved`; never repeat the already-successful main action.
 - Local dismissal (`card:dismiss`, or the browser/iPhone "Dismiss card" control) moves a card to done with no work item, no approval digest, and no connector call; reverse it with `card:return-to-review`. Source cleanup is a separate `card:cleanup-source` command that queues a `default_cleanup` work item for Codex to claim, verify with `action:verify`, and drain.
+- Treat **To review** as an actionability lane, not the set of all unresolved work. Put cards with
+  no useful user action now into `attentionState.kind = "waiting"` or `"blocked"`. Do not attach an
+  attention state to queued, working, or done cards.
+- Run `card:evaluate-triggers` during the normal feed cycle. It returns due waiting cards to review
+  once; source collection still decides whether new evidence should move a held card elsewhere.
+- For `repo_execution`, the feed thread is a thin Operator. It must reserve, create or reuse, bind,
+  and monitor the exact repo-scoped task. It must not execute the material repository work.
 
 ## Claim Guidance
 
@@ -67,6 +74,57 @@ For `recollect_sources` work:
 - Record source runs with `tend cli source:record-run --work <work>`.
 - Record the resulting sweep with `tend cli sweep:record-batch --work <work>`.
 - Complete the work only after the source run and sweep batch are written back.
+
+For `repo_execution` work:
+
+1. Claim the queued work from the feed's home thread.
+2. Call `work:executor-reserve` with the exact `repoKey`, `resourceKey`, and `sourceFingerprint`
+   already recorded on the work item. A reservation uses the idempotency key `executor:<work-id>`.
+3. Search for the deterministic repo task before creating one. Create a task only when no matching
+   task exists, then read back its task id, exact project id, and cwd.
+4. Call `work:executor-bind`. Binding fences out the Operator's capability to complete the work.
+5. Send the bounded execution envelope. The bound task calls `work:executor-claim` with its own task
+   id before any mutation.
+6. The executor completes with a structured receipt. The Operator validates and monitors; it does
+   not substitute its own implementation or summary.
+
+Only two repository executors may be active globally. Use the second slot only for an independent
+repository, and allow only one executor to own a resource key. A block, clarification, retry, or
+missing-record correction continues in the same bound task. Use `work:retry` to return blocked work
+to that task; do not create a replacement lineage.
+
+The receipt supplied as `result.receipt` has this shape:
+
+```json
+{
+  "schemaVersion": "1",
+  "workId": "work_...",
+  "cardId": "card-id",
+  "executorTaskId": "task-id",
+  "repoKey": "repository-key",
+  "outcome": "completed",
+  "summary": "What changed and why.",
+  "changedTargets": [{ "path": "src/example.ts", "reason": "Implemented the approved behavior." }],
+  "canonicalRecords": [
+    { "kind": "session", "ref": "SESSION_LOG.md", "result": "updated" },
+    { "kind": "decision", "ref": "DECISIONS.md", "result": "not_applicable", "reason": "No decision changed." }
+  ],
+  "verification": [{ "check": "focused tests", "result": "passed", "evidence": "bun test test/example.test.ts" }],
+  "externalEffects": []
+}
+```
+
+`outcome` is `completed`, `needs_review`, `waiting`, `blocked`, or `failed`. A waiting outcome must
+also include a waiting `attentionState`. A blocked or failed outcome must include `blocker` with
+`owner`, `reason`, and `unblockAction`. Every material execution requires an updated session record
+and concrete verification. Changed targets must be repository-relative. Canonical record references
+may be repository-relative, a Tend `/api/artifacts/` path, or an HTTPS GitHub URL, but the required
+session record itself must be repository-relative. Absolute paths, arbitrary URLs, credentials, and
+`..` traversal are rejected. Only receipt schema version `1` is accepted.
+
+`completed` moves the card to Done. `needs_review` returns it to To review. `waiting` completes the
+execution but places the card in Waiting. `blocked` and `failed` preserve retryable blocked work and
+place the card in Blocked.
 
 ## Core Commands
 
@@ -97,16 +155,20 @@ Run `tend cli help` for the full command surface. Core feed-runner commands are:
 | Clean up the card's source | `tend cli card:cleanup-source --feed <feed> --card <card>` |
 | Undo queued source cleanup | `tend cli card:undo-cleanup-source --feed <feed> --card <card>` |
 | Return card to review | `tend cli card:return-to-review --feed <feed> --card <card>` |
+| Evaluate due waiting cards | `tend cli card:evaluate-triggers --feed <feed> [--now <ISO timestamp>]` |
 | List work | `tend cli work:list --feed <feed> --thread <thread>` |
 | Claim work | `tend cli work:claim --feed <feed> --thread <thread> [--session <id>]` |
 | Reassign queued work between lanes | `tend cli work:assign --feed <feed> --work <work> --agent <codex\|claude>` |
 | Release a claimed item back to the queue | `tend cli work:release --feed <feed> --work <work> --token <token> [--session <id>]` |
 | Edit queued work | `tend cli work:edit --feed <feed> --work <work> --instruction <text>` |
 | Cancel work | `tend cli work:cancel --feed <feed> --work <work>` |
+| Reserve repository executor | `tend cli work:executor-reserve --feed <feed> --work <work> --token <token> --repo <key> --resource <key> --source-fingerprint <digest>` |
+| Bind repository executor | `tend cli work:executor-bind --feed <feed> --work <work> --token <token> --task <task-id> --project <project-id> --cwd <absolute-repo-root>` |
+| Claim as bound executor | `tend cli work:executor-claim --feed <feed> --work <work> --task <task-id>` |
 | Verify approved action | `tend cli action:verify --feed <feed> --work <work> --token <token>` |
-| Complete work | `tend cli work:complete --feed <feed> --work <work> --token <token> --result <json>` |
-| Fail work | `tend cli work:fail --feed <feed> --work <work> --token <token> --error <text>` |
-| Block work | `tend cli work:block --feed <feed> --work <work> --token <token> --error <text>` |
+| Complete work | `tend cli work:complete --feed <feed> --work <work> --token <token> (--result <json> \| --result-file <path>)` |
+| Fail non-repository work | `tend cli work:fail --feed <feed> --work <work> --token <token> --error <text>` |
+| Block work | `tend cli work:block --feed <feed> --work <work> --token <token> ((--result <json> \| --result-file <path>) \| --error <text> [--owner <text>] [--unblock-action <text>])`; repository execution requires the structured receipt form |
 | Reconcile succeeded blocked approval | `tend cli work:reconcile-approved --feed <feed> --work <work> --token <token> --result <json>` |
 | Retry work | `tend cli work:retry --feed <feed> --work <work>` |
 | Request learning | `tend cli learning:request --feed <feed>` |

@@ -4,11 +4,13 @@ import type {
   AgentWakeLine,
   Card,
   CardAction,
+  CardAttentionState,
   CardBlock,
   CardContextInfluence,
   FeedConfig,
   FeedMindContext,
   FeedView,
+  ExecutorReceipt,
   MindContextBinding,
   MindContextFeedObservation,
   MindContextHealth,
@@ -38,6 +40,7 @@ import type {
   WorkspaceRevision,
 } from "../shared/types";
 import type { MobileActionProjection, MobileCommand, MobileCommandResult, MobileCommandReceipt } from "../shared/mobile";
+import { isDeepStrictEqual } from "node:util";
 import { isReservedCardActionId, safeConfiguredCardActions } from "../shared/cardActions";
 import { containsFullEmail } from "../shared/emailThread";
 import { agentLabel, effectiveWorkLane } from "../shared/lanes";
@@ -98,6 +101,10 @@ function orderedWorkItems(work: WorkItem[]): WorkItem[] {
 
 function queuedClaudeWorkCount(work: WorkItem[], thread: ThreadBinding): number {
   return work.filter((item) => item.status === "queued" && effectiveWorkLane(item, thread) === "claude").length;
+}
+
+function handedOffToExecutor(work: WorkItem): boolean {
+  return work.kind === "repo_execution" && (work.executor?.state === "bound" || work.executor?.state === "claimed");
 }
 
 export function isClaimedWorkItem(result: WorkClaimResult): result is WorkItem {
@@ -337,7 +344,103 @@ function validateCardActions(actions: CardAction[] | undefined): void {
     if (isReservedCardActionId(action.id)) throw new Error(`Card action id "${action.id}" is reserved by Tend.`);
     if (ids.has(action.id)) throw new Error(`Card action id "${action.id}" must be unique within a card.`);
     ids.add(action.id);
+    if (action.behavior === "delegate_repo_task") {
+      if (!action.instruction?.trim()) throw new Error(`Repo task action "${action.id}" needs an instruction.`);
+      if (!action.execution?.repoKey?.trim()) throw new Error(`Repo task action "${action.id}" needs execution.repoKey.`);
+      if (!action.execution.resourceKey?.trim()) throw new Error(`Repo task action "${action.id}" needs execution.resourceKey.`);
+      if (!action.execution.sourceFingerprint?.trim()) throw new Error(`Repo task action "${action.id}" needs execution.sourceFingerprint.`);
+    } else if (action.execution) {
+      throw new Error(`Only delegate_repo_task actions may define execution metadata.`);
+    }
   }
+}
+
+function validIsoDate(value: string): boolean {
+  return Number.isFinite(Date.parse(value)) && value.includes("T");
+}
+
+function validateAttentionState(state: CardAttentionState | null | undefined, status?: Card["status"]): void {
+  if (state === undefined || state === null) return;
+  if (status === "done") throw new Error("Done cards cannot have an attention state.");
+  if (status === "queued" || status === "working") throw new Error("Active cards cannot have an attention state.");
+  if (!validIsoDate(state.since)) throw new Error("Card attention state needs a valid ISO since timestamp.");
+  if (state.kind === "waiting") {
+    if (!state.waitingOn?.trim()) throw new Error("Waiting attention state needs waitingOn.");
+    if (!state.resumeWhen?.trim()) throw new Error("Waiting attention state needs resumeWhen.");
+    if (state.lastCompletedAction !== undefined && !state.lastCompletedAction.trim()) throw new Error("Waiting attention state lastCompletedAction must be non-empty when present.");
+    if (state.recheckAt && !validIsoDate(state.recheckAt)) throw new Error("Waiting attention state recheckAt must be an ISO timestamp.");
+    return;
+  }
+  if (!state.blocker?.trim()) throw new Error("Blocked attention state needs blocker.");
+  if (!state.unblockOwner?.trim()) throw new Error("Blocked attention state needs unblockOwner.");
+  if (!state.unblockAction?.trim()) throw new Error("Blocked attention state needs unblockAction.");
+  if (state.lastVerifiedEvidence !== undefined && !state.lastVerifiedEvidence.trim()) {
+    throw new Error("Blocked attention state lastVerifiedEvidence must be non-empty when present.");
+  }
+}
+
+function isRepoRelativeReceiptRef(value: string): boolean {
+  if (!value.trim() || value.includes(String.fromCharCode(0))) return false;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return false;
+  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) return false;
+  return !value.split(/[\\/]/).includes("..");
+}
+
+function isAllowlistedReceiptRef(value: string): boolean {
+  if (isRepoRelativeReceiptRef(value)) return true;
+  if (value.startsWith("/api/artifacts/") && !value.includes("..")) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "github.com" && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+function validateExecutorReceipt(work: WorkItem, receipt: ExecutorReceipt | undefined): asserts receipt is ExecutorReceipt {
+  if (!receipt) throw new Error("Repo execution completion requires an executor receipt.");
+  if (receipt.schemaVersion !== "1") throw new Error("Executor receipt schemaVersion is unsupported.");
+  if (receipt.workId !== work.id || receipt.cardId !== work.cardId) throw new Error("Executor receipt work or card identity does not match.");
+  if (!work.executor?.taskId || receipt.executorTaskId !== work.executor.taskId) throw new Error("Executor receipt task does not match the bound executor task.");
+  if (!work.repoKey || receipt.repoKey !== work.repoKey) throw new Error("Executor receipt repository does not match the delegated repository.");
+  if (!["completed", "needs_review", "waiting", "blocked", "failed"].includes(receipt.outcome)) throw new Error("Executor receipt outcome is invalid.");
+  if (!receipt.summary?.trim()) throw new Error("Executor receipt needs a summary.");
+  if (!Array.isArray(receipt.changedTargets) || receipt.changedTargets.some((target) => !target || !isRepoRelativeReceiptRef(target.path) || !target.reason?.trim())) {
+    throw new Error("Executor receipt changed targets must use repo-relative logical paths with reasons.");
+  }
+  if (!Array.isArray(receipt.canonicalRecords)) throw new Error("Executor receipt needs canonicalRecords.");
+  if (!receipt.canonicalRecords.some((record) => record.kind === "session" && record.result === "updated" && isRepoRelativeReceiptRef(record.ref))) {
+    throw new Error("Every material repo execution requires an updated session record.");
+  }
+  const recordKinds = new Set(["status", "decision", "session", "handoff", "qa", "git", "artifact"]);
+  const recordResults = new Set(["updated", "not_applicable"]);
+  for (const record of receipt.canonicalRecords) {
+    if (!record || !recordKinds.has(record.kind) || !recordResults.has(record.result)) throw new Error("Executor receipt canonical record kind or result is invalid.");
+    if (!isAllowlistedReceiptRef(record.ref)) throw new Error("Executor receipt record references must be repo-relative, Tend artifact paths, or GitHub URLs.");
+    if (record.result === "not_applicable" && !record.reason?.trim()) throw new Error("Not-applicable canonical records need a reason.");
+  }
+  if (!Array.isArray(receipt.verification) || !receipt.verification.length || receipt.verification.some((item) => !item.check?.trim() || !item.result?.trim() || !item.evidence?.trim())) {
+    throw new Error("Executor receipt needs concrete verification evidence.");
+  }
+  if (receipt.verification.some((item) => item.result !== "passed" && item.result !== "failed")) {
+    throw new Error("Executor receipt verification result is invalid.");
+  }
+  if (receipt.outcome === "completed" && receipt.verification.some((item) => item.result !== "passed")) {
+    throw new Error("Completed repo execution requires every verification check to pass.");
+  }
+  if (!Array.isArray(receipt.externalEffects) || receipt.externalEffects.some((effect) => !effect || !effect.system?.trim() || !effect.effectId?.trim())) {
+    throw new Error("Executor receipt externalEffects need system and effectId strings.");
+  }
+  if (receipt.outcome === "waiting") {
+    if (receipt.attentionState?.kind !== "waiting") throw new Error("Waiting executor outcome needs a waiting attention state.");
+    validateAttentionState(receipt.attentionState);
+  }
+  if (receipt.outcome === "blocked" || receipt.outcome === "failed") {
+    if (!receipt.blocker?.owner?.trim() || !receipt.blocker.reason?.trim() || !receipt.blocker.unblockAction?.trim()) {
+      throw new Error("Blocked executor outcome needs blocker owner, reason, and unblockAction.");
+    }
+  }
+  if (receipt.outcome !== "waiting" && receipt.attentionState) throw new Error("Only a waiting executor outcome may include an attention state.");
 }
 
 function offersSourceCleanup(card: Card): boolean {
@@ -1348,10 +1451,12 @@ export class AttentionDomain {
     if (card.status === "done") throw new Error("Done cards cannot be queued.");
     const work = queuedWork(feedId, cardId, instruction, {
       kind: "instruction",
+      ...(card.attentionState ? { previousAttentionState: card.attentionState } : {}),
       ...(options.assignee ? { assignee: options.assignee } : {}),
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
     card.status = "queued";
+    card.attentionState = undefined;
     appendHistory(card, "user.instruction", instruction.trim());
     await this.persistQueuedWork(feedId, work, {
       afterWrite: async () => {
@@ -1419,9 +1524,11 @@ export class AttentionDomain {
       approvalDigest,
       completionCleanup: feed.config.defaultCleanup,
       ...(cardActionId ? { cardActionId } : {}),
+      ...(card.attentionState ? { previousAttentionState: card.attentionState } : {}),
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
     card.status = "queued";
+    card.attentionState = undefined;
     appendHistory(card, "user.approved_action", approvalDigest);
     await this.persistQueuedWork(feedId, work, {
       afterWrite: async () => {
@@ -1488,9 +1595,11 @@ export class AttentionDomain {
     const work = queuedWork(feedId, cardId, config.defaultCleanup, {
       kind: "default_cleanup",
       approvalDigest,
+      ...(card.attentionState ? { previousAttentionState: card.attentionState } : {}),
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
     card.status = "queued";
+    card.attentionState = undefined;
     // A card can be cleaned up after a local dismissal; queuing cleanup supersedes the dismissed
     // done-state, so clear it to avoid a stale disposition if the cleanup is later undone.
     card.completedAt = undefined;
@@ -1517,6 +1626,23 @@ export class AttentionDomain {
     return this.store.serialize(() => this.queueInstructionLocked(feedId, cardId, instruction, undefined, options));
   }
 
+  async queueAttentionCheck(feedId: string, cardId: string): Promise<WorkItem> {
+    return this.store.serialize(async () => {
+      const card = await this.store.readCard(feedId, cardId);
+      if (!card.attentionState) throw new Error("Only a waiting or blocked card can be checked.");
+      const blockedExecutor = (await this.store.readWorkItems(feedId)).find((work) =>
+        work.cardId === cardId && work.kind === "repo_execution" && work.status === "blocked" && Boolean(work.executor?.taskId)
+      );
+      if (blockedExecutor) {
+        throw new Error("This blocker belongs to a bound repo executor. Retry the same executor task or move the card to review; do not fork an evidence-check work item.");
+      }
+      const instruction = card.attentionState.kind === "waiting"
+        ? `Re-read the authoritative source for this exact card and evaluate whether this resume condition is now true: ${card.attentionState.resumeWhen}. Make no material or external mutation. Preserve the same card identity and return it to Waiting, Blocked, To review, or Done from current evidence.`
+        : `Re-read the authoritative source for this exact card and verify this blocker: ${card.attentionState.blocker}. Evaluate whether the unblock action is now satisfied: ${card.attentionState.unblockAction}. Make no material or external mutation. Preserve the same card identity and return it to Blocked, To review, Queued, or Done from current evidence.`;
+      return this.queueInstructionLocked(feedId, cardId, instruction);
+    });
+  }
+
   async queueFeedInstruction(feedId: string, instruction: string, options: { assignee?: WorkAgent } = {}): Promise<WorkItem> {
     if (!instruction.trim()) throw new Error("Instruction is required.");
     await this.assertClaudeRoutingAllowed(feedId, options.assignee);
@@ -1533,6 +1659,61 @@ export class AttentionDomain {
     return this.store.serialize(() => this.approveActionLocked(feedId, cardId, cardActionId));
   }
 
+  async queueRepoExecution(feedId: string, cardId: string, cardActionId: string): Promise<WorkItem> {
+    return this.store.serialize(async () => {
+      const card = await this.store.readCard(feedId, cardId);
+      if (card.status === "done") throw new Error("Done cards cannot be delegated.");
+      await this.assertCardSourceCurrent(card);
+      const action = card.actions?.find((candidate) => candidate.id === cardActionId && candidate.behavior === "delegate_repo_task");
+      if (!action?.instruction?.trim() || !action.execution) throw new Error("Repo task action not found.");
+      const active = (await this.store.readWorkItems(feedId)).filter((work) =>
+        work.cardId === cardId
+        && work.kind === "repo_execution"
+        && work.cardActionId === cardActionId
+        && (work.status === "queued" || work.status === "working" || work.status === "blocked")
+      );
+      const existing = active.find((work) =>
+        work.sourceFingerprint === action.execution!.sourceFingerprint
+        && work.repoKey === action.execution!.repoKey.trim()
+        && work.resourceKey === action.execution!.resourceKey.trim()
+        && work.instruction === action.instruction!.trim()
+      );
+      if (existing) return existing;
+      if (active.some((work) => work.status === "working" || work.status === "blocked")) {
+        throw new Error("A repo execution lineage is already active for an older source snapshot.");
+      }
+      for (const work of active) {
+        work.status = "stale";
+        work.error = "Delegation stale - a newer source snapshot was approved.";
+        await this.store.writeWork(work);
+      }
+      const work = queuedWork(feedId, cardId, action.instruction, {
+        kind: "repo_execution",
+        cardActionId,
+        repoKey: action.execution.repoKey.trim(),
+        resourceKey: action.execution.resourceKey.trim(),
+        sourceFingerprint: action.execution.sourceFingerprint.trim(),
+        ...(card.attentionState ? { previousAttentionState: card.attentionState } : {}),
+      });
+      card.status = "queued";
+      card.attentionState = undefined;
+      appendHistory(card, "user.delegated_repo_task", work.id);
+      await this.persistQueuedWork(feedId, work, {
+        afterWrite: async () => {
+          await this.store.writeCard(card);
+          await this.store.appendEvent({
+            feedId,
+            cardId,
+            workId: work.id,
+            type: "work.repo_execution_queued",
+            detail: { cardActionId, repoKey: work.repoKey, resourceKey: work.resourceKey, sourceFingerprint: work.sourceFingerprint },
+          });
+        },
+      });
+      return work;
+    });
+  }
+
   async runCardAction(feedId: string, cardId: string, cardActionId: string): Promise<WorkItem | Card> {
     const card = await this.store.readCard(feedId, cardId);
     if (card.actions?.some((action) => action.id === cardActionId && isReservedCardActionId(action.id))) {
@@ -1545,6 +1726,7 @@ export class AttentionDomain {
     if (!action) throw new Error("Card action not found.");
     if (action.behavior === "default_cleanup") return this.queueSourceCleanup(feedId, cardId);
     if (action.behavior === "dismiss_card") return this.dismissCard(feedId, cardId);
+    if (action.behavior === "delegate_repo_task") return this.queueRepoExecution(feedId, cardId, action.id);
     await this.assertCardSourceCurrent(card);
     if (!action.instruction?.trim()) throw new Error("Card action instruction is required.");
     if (action.behavior === "queue_instruction") return this.queueInstruction(feedId, cardId, action.instruction);
@@ -1560,7 +1742,7 @@ export class AttentionDomain {
   // Local, connector-free dismissal: removes a card from review without creating any WorkItem,
   // approval digest, or external connector mutation. Reversible via returnCardToReview().
   async dismissCard(feedId: string, cardId: string): Promise<Card> {
-    return this.store.serialize(() => this.dismissCardLocked(feedId, cardId));
+    return this.store.serializeAtomic(() => this.dismissCardLocked(feedId, cardId));
   }
 
   private async dismissCardLocked(feedId: string, cardId: string, sourceMobileCommandId?: string): Promise<Card> {
@@ -1575,9 +1757,17 @@ export class AttentionDomain {
       throw new Error("Only a card under review can be dismissed.");
     }
     card.status = "done";
+    card.attentionState = undefined;
     card.completedAt = isoNow();
     card.completionDisposition = "dismissed";
     appendHistory(card, "user.card_dismissed", sourceMobileCommandId);
+    for (const work of (await this.store.readWorkItems(feedId)).filter((item) => item.cardId === cardId && item.status === "blocked")) {
+      work.status = "cancelled";
+      work.error = "Cancelled because the blocked card was dismissed locally.";
+      work.updatedAt = isoNow();
+      await this.store.writeWork(work);
+      await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "work.cancelled", detail: { reason: work.error } });
+    }
     await this.store.writeCard(card);
     await this.store.appendEvent({
       feedId,
@@ -1705,6 +1895,7 @@ export class AttentionDomain {
       work.status = "cancelled";
       const card = await this.store.readCard(feedId, cardId);
       card.status = "to_review_updated";
+      card.attentionState = work.previousAttentionState;
       card.readyForPass = feed.config.currentPass;
       card.completedAt = undefined;
       card.completionDisposition = undefined;
@@ -1723,7 +1914,7 @@ export class AttentionDomain {
       if (card.routineActionGroupId) throw new Error("This card belongs to a routine action group. Review the group instead.");
       const activeWork = (await this.store.readWorkItems(feedId)).filter((work) =>
         work.cardId === cardId &&
-        (work.status === "queued" || work.status === "working" || work.status === "approved_blocked")
+        (work.status === "queued" || work.status === "working" || work.status === "blocked" || work.status === "approved_blocked")
       );
       if (activeWork.some((work) => work.status === "working")) {
         throw new Error("Codex already started this card. Wait for it to finish before moving it back to review.");
@@ -1735,6 +1926,7 @@ export class AttentionDomain {
         await this.store.appendEvent({ feedId, cardId, workId: work.id, type: "work.cancelled", detail: { reason: work.error } });
       }
       card.status = "to_review_updated";
+      card.attentionState = undefined;
       card.readyForPass = feed.config.currentPass;
       card.completedAt = undefined;
       card.completionDisposition = undefined;
@@ -1804,7 +1996,7 @@ export class AttentionDomain {
     if (!MOBILE_COMMAND_ID_PATTERN.test(command.id) || !command.feedId.trim() || !command.cardId.trim()) {
       throw new Error("Mobile command id, feedId, and cardId are required.");
     }
-    return this.store.serializeAtomic(async () => {
+    return this.store.serialize(async () => {
       if (await this.store.hasMobileCommandReceipt(command.id)) {
         const receipt = await this.store.readMobileCommandReceipt(command.id);
         if (
@@ -1938,7 +2130,7 @@ export class AttentionDomain {
           if (card.routineActionGroupId) throw new Error("Routine-group cards must be reviewed through their group.");
           const activeWork = (await this.store.readWorkItems(command.feedId)).filter((item) =>
             item.cardId === command.cardId
-            && (item.status === "queued" || item.status === "working" || item.status === "approved_blocked")
+            && (item.status === "queued" || item.status === "working" || item.status === "blocked" || item.status === "approved_blocked")
           );
           if (activeWork.some((item) => item.status === "working")) {
             throw new Error("Codex already started this card; it cannot return to review yet.");
@@ -1950,6 +2142,7 @@ export class AttentionDomain {
             await this.store.writeWork(item);
           }
           card.status = "to_review_updated";
+          card.attentionState = undefined;
           card.readyForPass = feed.config.currentPass;
           card.completedAt = undefined;
           card.completionDisposition = undefined;
@@ -2029,7 +2222,7 @@ export class AttentionDomain {
         this.store.readThread(feedId),
       ]);
       const workItems = orderedWorkItems(await this.store.readWorkItems(feedId));
-      const existing = workItems.find((work) => work.status === "working" && callerCanSeeWork(caller, work, thread));
+      const existing = workItems.find((work) => work.status === "working" && !handedOffToExecutor(work) && callerCanSeeWork(caller, work, thread));
       if (existing && !(await this.quarantineLegacyMutationWork(feed, existing))) {
         const claimant = claimantForWork(caller, existing, thread);
         if (!existing.claimedBy) {
@@ -2079,12 +2272,18 @@ export class AttentionDomain {
   }
 
   async releaseWork(feedId: string, workId: string, token: string, sessionId?: string): Promise<WorkItemView> {
-    return this.store.serialize(async () => {
+    return this.store.serializeAtomic(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Only working work can be released.");
       if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
+      if (work.kind === "repo_execution" && work.executor?.state !== "reserved" && work.executor) {
+        throw new Error("Bound repo execution work cannot be released. The same executor task must complete or block it.");
+      }
       if (!work.claimedBy) throw new Error("Working work has no recorded claimant.");
       const releasedBy = work.claimedBy;
+      if (work.kind === "repo_execution" && work.executor?.state === "reserved") {
+        work.executor = undefined;
+      }
       this.requeueWorkItem(work);
       await this.persistQueuedWork(feedId, work, {
         afterWrite: () => this.store.appendEvent({
@@ -2096,6 +2295,167 @@ export class AttentionDomain {
         }),
       });
       return workItemView(work);
+    });
+  }
+
+  async reserveExecutor(
+    feedId: string,
+    workId: string,
+    token: string,
+    reservation: { repoKey: string; resourceKey: string; sourceFingerprint: string },
+  ): Promise<WorkItemView> {
+    return this.store.serialize(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if (work.kind !== "repo_execution" || work.status !== "working") throw new Error("Only claimed repo execution work can reserve an executor.");
+      if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
+      if (!reservation.repoKey?.trim() || !reservation.resourceKey?.trim() || !reservation.sourceFingerprint?.trim()) {
+        throw new Error("Executor reservation needs repoKey, resourceKey, and sourceFingerprint.");
+      }
+      if (
+        reservation.repoKey !== work.repoKey
+        || reservation.resourceKey !== work.resourceKey
+        || reservation.sourceFingerprint !== work.sourceFingerprint
+      ) {
+        throw new Error("Executor reservation does not match the approved repo execution target.");
+      }
+      try {
+        const card = await this.store.readCard(feedId, work.cardId);
+        await this.assertCardSourceCurrent(card);
+        const action = card.actions?.find((candidate) => candidate.id === work.cardActionId && candidate.behavior === "delegate_repo_task");
+        if (
+          !action?.instruction?.trim()
+          || !action.execution
+          || action.instruction.trim() !== work.instruction
+          || action.execution.repoKey.trim() !== work.repoKey
+          || action.execution.resourceKey.trim() !== work.resourceKey
+          || action.execution.sourceFingerprint.trim() !== work.sourceFingerprint
+        ) {
+          throw new Error("Repo execution action or source fingerprint changed before dispatch.");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        work.status = "stale";
+        work.error = message;
+        work.updatedAt = isoNow();
+        const config = await this.store.readConfig(feedId);
+        const card = await this.store.readCard(feedId, work.cardId);
+        card.status = "to_review_updated";
+        card.attentionState = undefined;
+        card.readyForPass = config.currentPass;
+        appendHistory(card, "work.executor_source_stale", work.id);
+        await this.store.writeWork(work);
+        await this.store.writeCard(card);
+        await this.store.appendEvent({
+          feedId,
+          cardId: work.cardId,
+          workId,
+          type: "work.executor_source_stale",
+          detail: { error: message },
+        });
+        throw error;
+      }
+      const tokenDigest = digest(token);
+      if (work.executor) {
+        if (
+          work.executor.idempotencyKey === `executor:${work.id}`
+          && work.executor.repoKey === reservation.repoKey
+          && work.executor.resourceKey === reservation.resourceKey
+          && work.executor.sourceFingerprint === reservation.sourceFingerprint
+          && work.executor.reservationCapabilityDigest === tokenDigest
+        ) return workItemView(work);
+        throw new Error("Executor reservation already exists with different identity.");
+      }
+      const lockOwners: WorkItem[] = [];
+      for (const candidateFeedId of await this.store.listFeedIds()) {
+        lockOwners.push(...(await this.store.readWorkItems(candidateFeedId)).filter((candidate) =>
+          candidate.id !== work.id
+          && candidate.kind === "repo_execution"
+          && (candidate.status === "working" || candidate.status === "blocked")
+          && Boolean(candidate.executor)
+        ));
+      }
+      if (lockOwners.filter((candidate) => candidate.status === "working").length >= 2) {
+        throw new Error("At most two repo executors may be active globally.");
+      }
+      if (lockOwners.some((candidate) => candidate.repoKey === reservation.repoKey || candidate.resourceKey === reservation.resourceKey)) {
+        throw new Error(`Another executor already owns repository ${reservation.repoKey} or resource ${reservation.resourceKey}.`);
+      }
+      work.executor = {
+        state: "reserved",
+        idempotencyKey: `executor:${work.id}`,
+        repoKey: reservation.repoKey,
+        resourceKey: reservation.resourceKey,
+        sourceFingerprint: reservation.sourceFingerprint,
+        reservationCapabilityDigest: tokenDigest,
+        reservedAt: isoNow(),
+      };
+      await this.store.writeWork(work);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.executor_reserved", detail: { repoKey: work.repoKey, resourceKey: work.resourceKey } });
+      return workItemView(work);
+    });
+  }
+
+  async bindExecutor(
+    feedId: string,
+    workId: string,
+    token: string,
+    binding: { taskId: string; projectId: string; cwd: string },
+  ): Promise<WorkItemView> {
+    return this.store.serializeAtomic(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if (work.kind !== "repo_execution" || work.status !== "working" || !work.executor) {
+        throw new Error("Repo execution work must reserve an executor before binding.");
+      }
+      if (!binding.taskId?.trim() || !binding.projectId?.trim() || !binding.cwd?.trim()) {
+        throw new Error("Executor binding needs taskId, projectId, and cwd.");
+      }
+      const exactExisting = work.executor.taskId === binding.taskId
+        && work.executor.projectId === binding.projectId
+        && work.executor.cwd === binding.cwd;
+      if (work.executor.state !== "reserved") {
+        if (exactExisting && work.executor.reservationCapabilityDigest === digest(token)) return workItemView(work);
+        throw new Error("Executor binding is immutable once recorded.");
+      }
+      if (work.capabilityToken !== token || work.executor.reservationCapabilityDigest !== digest(token)) {
+        throw new Error("Invalid scoped work capability token.");
+      }
+      work.executor = {
+        ...work.executor,
+        state: "bound",
+        taskId: binding.taskId.trim(),
+        projectId: binding.projectId.trim(),
+        cwd: binding.cwd.trim(),
+        boundAt: isoNow(),
+      };
+      work.capabilityToken = makeToken();
+      work.claimedBy = undefined;
+      work.claimedAt = undefined;
+      await this.store.writeWork(work);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.executor_bound", detail: { taskId: work.executor.taskId, projectId: work.executor.projectId } });
+      return workItemView(work);
+    });
+  }
+
+  async claimExecutor(feedId: string, workId: string, taskId: string): Promise<WorkItem> {
+    return this.store.serializeAtomic(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if (work.kind !== "repo_execution" || work.status !== "working" || !work.executor?.taskId) {
+        throw new Error("Repo execution work is not bound to an executor task.");
+      }
+      if (work.executor.taskId !== taskId) throw new Error("Only the bound executor task may claim this work.");
+      if (work.executor.state === "claimed") {
+        if (work.claimedBy?.threadId !== taskId) throw new Error("Executor claim identity is inconsistent.");
+        return work;
+      }
+      if (work.executor.state !== "bound") throw new Error("Executor work is not ready to claim.");
+      const claimedAt = isoNow();
+      work.executor = { ...work.executor, state: "claimed", claimedAt };
+      work.claimedBy = { agent: "codex", threadId: taskId };
+      work.claimedAt = claimedAt;
+      work.capabilityToken = makeToken();
+      await this.store.writeWork(work);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.executor_claimed", detail: { taskId } });
+      return work;
     });
   }
 
@@ -2118,6 +2478,7 @@ export class AttentionDomain {
         const hasActiveWork = feed.work.some((item) => item.id !== work.id && item.cardId === work.cardId && (item.status === "queued" || item.status === "working"));
         if (!hasActiveWork) {
           card.status = "to_review_updated";
+          card.attentionState = work.previousAttentionState;
           card.readyForPass = feed.config.currentPass;
           card.completedAt = undefined;
           card.completionDisposition = undefined;
@@ -2136,14 +2497,34 @@ export class AttentionDomain {
     });
   }
 
-  async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; actions?: CardAction[]; done?: boolean; postAction?: PostActionCompletion }): Promise<WorkItem> {
+  async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; actions?: CardAction[]; done?: boolean; postAction?: PostActionCompletion; receipt?: ExecutorReceipt }): Promise<WorkItem> {
     if (result.blocks) validateCardBlocks(result.blocks);
     validateCardActions(result.actions);
-    return this.store.serialize(async () => {
+    // Stale-approval quarantine writes must survive this method throwing. serializeAtomic wraps the
+    // callback in a SQLite transaction in the production runtime, so throwing inside the callback
+    // would roll the quarantine writes back and leave the item claimed as "working" forever. Stale
+    // branches therefore return a marker, and the error is thrown after the transaction commits.
+    const outcome = await this.store.serializeAtomic<{ work: WorkItem } | { staleError: string }>(async () => {
       const work = await this.store.readWork(feedId, workId);
+      if (
+        work.kind === "repo_execution"
+        && (work.status === "completed" || work.status === "blocked")
+        && work.executorReceipt
+        && work.capabilityToken === token
+      ) {
+        validateExecutorReceipt(work, result.receipt);
+        if (isDeepStrictEqual(work.executorReceipt, result.receipt)) return { work };
+        throw new Error("Repo execution already has a different terminal receipt.");
+      }
       if (work.status !== "working") throw new Error("Work item is not currently claimed.");
       if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
       if (!result.response?.trim()) throw new Error("A work response is required.");
+      if (work.kind === "repo_execution") {
+        if (work.executor?.state !== "claimed" || work.claimedBy?.threadId !== work.executor.taskId) {
+          throw new Error("Repo execution must be claimed by its bound executor task before completion.");
+        }
+        validateExecutorReceipt(work, result.receipt);
+      }
       if (work.intent === "sweep_rejudge") {
         if (!work.feedbackId) throw new Error("Sweep rejudgment work is missing its feedback trace.");
         const trace = await this.store.readSweepFeedback(feedId, work.feedbackId);
@@ -2163,15 +2544,16 @@ export class AttentionDomain {
         if (!work.routineActionGroupId || !work.approvalDigest) throw new Error("Routine action work is missing its approved snapshot.");
         const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
         if (work.approvalDigest !== routineActionDigest(group)) {
+          const staleError = "Approval stale - the routine action group changed after approval.";
           work.status = "stale";
-          work.error = "Approval stale - the routine action group changed after approval.";
+          work.error = staleError;
           group.status = "stale";
-          group.error = work.error;
+          group.error = staleError;
           await this.releaseRoutineActionCards(group, true);
           await this.store.writeWork(work);
           await this.store.writeRoutineActionGroup(group);
           await this.store.appendEvent({ feedId, workId, type: "routine_action.stale", detail: { groupId: group.id } });
-          throw new Error(work.error);
+          return { staleError };
         }
         if (work.verifiedApprovalDigest !== work.approvalDigest) {
           throw new Error("Approved action must pass action:verify immediately before the external mutation.");
@@ -2197,15 +2579,16 @@ export class AttentionDomain {
             : actionDigest(card, work.cardActionId)
           : undefined;
         if (work.approvalDigest !== currentApprovalDigest) {
+          const staleError = "Approval stale - the proposed action or artifact changed after approval.";
           work.status = "stale";
-          work.error = "Approval stale - the proposed action or artifact changed after approval.";
+          work.error = staleError;
           card.status = "to_review_updated";
           card.readyForPass = (await this.store.readConfig(feedId)).currentPass + 1;
           appendHistory(card, "codex.stale_approval", work.id);
           await this.store.writeWork(work);
           await this.store.writeCard(card);
           await this.store.appendEvent({ feedId, cardId: card.id, workId, type: "action.stale" });
-          throw new Error(work.error);
+          return { staleError };
         }
         if (
           (work.kind === "execute_approved_action" || work.kind === "default_cleanup") &&
@@ -2230,6 +2613,38 @@ export class AttentionDomain {
         if (result.blocks) card.blocks = result.blocks;
         if (result.proposedAction) card.proposedAction = result.proposedAction;
         if (result.actions) card.actions = result.actions;
+        if (work.kind === "repo_execution") {
+          const receipt = result.receipt!;
+          const config = await this.store.readConfig(feedId);
+          if (receipt.outcome === "blocked" || receipt.outcome === "failed") {
+            work.status = "blocked";
+            work.error = receipt.blocker!.reason.trim();
+            work.executorReceipt = receipt;
+            work.updatedAt = isoNow();
+            card.status = "to_review_updated";
+            card.attentionState = {
+              kind: "blocked",
+              blocker: receipt.blocker!.reason.trim(),
+              unblockOwner: receipt.blocker!.owner.trim(),
+              unblockAction: receipt.blocker!.unblockAction.trim(),
+              since: isoNow(),
+            };
+            card.readyForPass = config.currentPass;
+            appendHistory(card, "executor.blocked", work.error);
+            await this.store.writeWork(work);
+            await this.store.writeCard(card);
+            await this.store.appendEvent({ feedId, cardId: card.id, workId, type: "work.executor_blocked", detail: { receipt } });
+            return { work };
+          }
+          card.attentionState = receipt.outcome === "waiting" ? receipt.attentionState : undefined;
+          const done = receipt.outcome === "completed";
+          card.status = done ? "done" : "to_review_updated";
+          card.completedAt = done ? isoNow() : undefined;
+          card.completionDisposition = done ? "completed" : undefined;
+          card.readyForPass = done ? config.currentPass + 1 : config.currentPass;
+          appendHistory(card, `executor.${receipt.outcome}`, receipt.summary.trim());
+          await this.store.writeCard(card);
+        } else {
         if (
           work.kind === "execute_approved_action"
           && work.completionCleanup
@@ -2251,7 +2666,7 @@ export class AttentionDomain {
             detail: { response: work.response, postAction: result.postAction },
           });
           if (work.claimedBy?.agent !== "claude") await this.maybeEmitClaudeWake(feedId, work, undefined, { includeDropped: true });
-          return work;
+          return { work };
         }
         const config = await this.store.readConfig(feedId);
         const done = work.kind === "execute_approved_action" && work.completionCleanup
@@ -2265,19 +2680,23 @@ export class AttentionDomain {
           : config.currentPass + 1;
         appendHistory(card, "codex.completed", result.response.trim());
         await this.store.writeCard(card);
+        }
       }
       work.status = "completed";
       work.completedAt = isoNow();
       work.response = result.response.trim();
       work.postAction = result.postAction;
+      work.executorReceipt = result.receipt;
       await this.store.writeWork(work);
       await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.completed", detail: { response: work.response, postAction: result.postAction } });
-      return work;
+      return { work };
     });
+    if ("staleError" in outcome) throw new Error(outcome.staleError);
+    return outcome.work;
   }
 
   async verifyApprovedAction(feedId: string, workId: string, token: string, authenticatedMailbox?: string): Promise<{ approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string; completionCleanup?: string }> {
-    return this.store.serialize(async () => {
+    return this.store.serializeAtomic(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Approved action work must be claimed before verification.");
       if ((work.kind !== "execute_approved_action" && work.kind !== "default_cleanup" && work.kind !== "routine_action_batch") || !work.approvalDigest) throw new Error("Work item is not an approved action.");
@@ -2323,7 +2742,11 @@ export class AttentionDomain {
   }
 
   async failWork(feedId: string, workId: string, token: string, error: string): Promise<WorkItem> {
-    return this.store.serialize(async () => {
+    const candidate = await this.store.readWork(feedId, workId);
+    if (candidate.kind === "repo_execution") {
+      throw new Error("Repo executor failures require a structured blocked or failed receipt through work:block --result.");
+    }
+    return this.store.serializeAtomic(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Work item is not currently claimed.");
       if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
@@ -2359,6 +2782,143 @@ export class AttentionDomain {
       await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.failed", detail: { error: work.error } });
       if (work.claimedBy?.agent !== "claude") await this.maybeEmitClaudeWake(feedId, work, undefined, { includeDropped: true });
       return work;
+    });
+  }
+
+  async blockWork(
+    feedId: string,
+    workId: string,
+    token: string,
+    blocker: { owner: string; reason: string; unblockAction: string; receipt?: ExecutorReceipt },
+  ): Promise<WorkItem> {
+    const initial = await this.store.readWork(feedId, workId);
+    if (initial.kind === "execute_approved_action") return this.blockApprovedWork(feedId, workId, token, blocker.reason);
+    return this.store.serializeAtomic(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if (
+        work.kind === "repo_execution"
+        && work.status === "blocked"
+        && work.executorReceipt
+        && work.capabilityToken === token
+      ) {
+        validateExecutorReceipt(work, blocker.receipt);
+        if (isDeepStrictEqual(work.executorReceipt, blocker.receipt)) return work;
+        throw new Error("Repo execution already has a different blocker receipt.");
+      }
+      if (work.status !== "working") throw new Error("Work item is not currently claimed.");
+      if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
+      if (!blocker.owner?.trim() || !blocker.reason?.trim() || !blocker.unblockAction?.trim()) {
+        throw new Error("Blocked work needs owner, reason, and unblockAction.");
+      }
+      if (work.kind === "repo_execution") {
+        if (work.executor?.state !== "claimed" || work.claimedBy?.threadId !== work.executor.taskId) {
+          throw new Error("Repo execution must be claimed by its bound executor task before blocking.");
+        }
+        validateExecutorReceipt(work, blocker.receipt);
+        if (blocker.receipt.outcome !== "blocked" && blocker.receipt.outcome !== "failed") {
+          throw new Error("Blocked work receipt must report blocked or failed.");
+        }
+        if (
+          blocker.receipt.blocker!.owner.trim() !== blocker.owner.trim()
+          || blocker.receipt.blocker!.reason.trim() !== blocker.reason.trim()
+          || blocker.receipt.blocker!.unblockAction.trim() !== blocker.unblockAction.trim()
+        ) {
+          throw new Error("Blocked repo work metadata must match the executor receipt blocker.");
+        }
+      }
+      work.status = "blocked";
+      work.error = blocker.reason.trim();
+      work.executorReceipt = blocker.receipt;
+      work.updatedAt = isoNow();
+      if (work.cardId !== "__feed__") {
+        const config = await this.store.readConfig(feedId);
+        const card = await this.store.readCard(feedId, work.cardId);
+        card.status = "to_review_updated";
+        card.attentionState = {
+          kind: "blocked",
+          blocker: blocker.reason.trim(),
+          unblockOwner: blocker.owner.trim(),
+          unblockAction: blocker.unblockAction.trim(),
+          since: isoNow(),
+        };
+        card.readyForPass = config.currentPass;
+        card.completedAt = undefined;
+        card.completionDisposition = undefined;
+        appendHistory(card, "work.blocked", work.error);
+        await this.store.writeCard(card);
+      }
+      await this.store.writeWork(work);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.blocked", detail: { owner: blocker.owner, reason: blocker.reason, unblockAction: blocker.unblockAction } });
+      return work;
+    });
+  }
+
+  async retryWork(feedId: string, workId: string): Promise<WorkItemView> {
+    const initial = await this.store.readWork(feedId, workId);
+    if (initial.kind === "execute_approved_action") return this.retryApprovedWork(feedId, workId);
+    if (initial.kind !== "repo_execution") {
+      return this.store.serialize(async () => {
+        const work = await this.store.readWork(feedId, workId);
+        if (work.status !== "blocked" || work.kind === "execute_approved_action" || work.kind === "repo_execution") {
+          throw new Error("Only blocked generic work can be retried through this path.");
+        }
+        work.status = "queued";
+        work.error = undefined;
+        work.executorReceipt = undefined;
+        work.capabilityToken = makeToken();
+        work.claimedBy = undefined;
+        work.claimedAt = undefined;
+        work.updatedAt = isoNow();
+        if (work.cardId !== "__feed__") {
+          const card = await this.store.readCard(feedId, work.cardId);
+          card.status = "queued";
+          card.attentionState = undefined;
+          card.completedAt = undefined;
+          card.completionDisposition = undefined;
+          appendHistory(card, "work.retry_queued", work.id);
+          await this.store.writeCard(card);
+        }
+        await this.store.writeWork(work);
+        await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.retry_queued" });
+        await this.maybeEmitClaudeWake(feedId, work, undefined, { includeDropped: true });
+        return workItemView(work);
+      });
+    }
+    return this.store.serializeAtomic(async () => {
+      const work = await this.store.readWork(feedId, workId);
+      if (work.kind !== "repo_execution" || work.status !== "blocked" || !work.executor?.taskId) {
+        throw new Error("Only blocked repo execution work with a bound task can be retried.");
+      }
+      const lockOwners: WorkItem[] = [];
+      for (const candidateFeedId of await this.store.listFeedIds()) {
+        lockOwners.push(...(await this.store.readWorkItems(candidateFeedId)).filter((candidate) =>
+          candidate.id !== work.id
+          && candidate.kind === "repo_execution"
+          && (candidate.status === "working" || candidate.status === "blocked")
+          && Boolean(candidate.executor)
+        ));
+      }
+      if (lockOwners.filter((candidate) => candidate.status === "working").length >= 2) {
+        throw new Error("At most two repo executors may be active globally.");
+      }
+      if (lockOwners.some((candidate) => candidate.repoKey === work.repoKey || candidate.resourceKey === work.resourceKey)) {
+        throw new Error(`Another executor already owns repository ${work.repoKey} or resource ${work.resourceKey}.`);
+      }
+      work.status = "working";
+      work.error = undefined;
+      work.executorReceipt = undefined;
+      work.capabilityToken = makeToken();
+      work.claimedBy = undefined;
+      work.claimedAt = undefined;
+      work.executor = { ...work.executor, state: "bound", claimedAt: undefined };
+      const card = await this.store.readCard(feedId, work.cardId);
+      card.status = "working";
+      card.attentionState = undefined;
+      appendHistory(card, "work.executor_retry", work.executor.taskId);
+      await this.store.writeWork(work);
+      await this.store.writeCard(card);
+      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.executor_retry", detail: { taskId: work.executor.taskId } });
+      return workItemView(work);
     });
   }
 
@@ -2529,7 +3089,10 @@ export class AttentionDomain {
     await this.store.serialize(() => this.store.writeSourceRecipe(feedId, sourceId, content.trim()));
   }
 
-  async upsertCard(feedId: string, input: Partial<Card> & Pick<Card, "id" | "title" | "why" | "blocks">): Promise<Card> {
+  async upsertCard(
+    feedId: string,
+    input: Omit<Partial<Card>, "attentionState"> & Pick<Card, "id" | "title" | "why" | "blocks"> & { attentionState?: CardAttentionState | null },
+  ): Promise<Card> {
     safeIdentifier(feedId, "Feed id");
     safeIdentifier(input.id, "Card id");
     validateCardBlocks(input.blocks);
@@ -2542,11 +3105,20 @@ export class AttentionDomain {
       if (sourceRunIds) await this.assertSourceRunIdsCurrent(feedId, sourceRunIds, input.id);
       const contextInfluence = await this.normalizeCardContextInfluence(feedId, sourceRunIds, input.contextInfluence);
       const resurfaced = input.status === "to_review_new" || input.status === "to_review_updated";
+      const status = input.status ?? existing?.status ?? "to_review_new";
+      const hasAttentionInput = Object.prototype.hasOwnProperty.call(input, "attentionState");
+      const attentionState = status === "queued" || status === "working" || status === "done"
+        ? undefined
+        : hasAttentionInput
+          ? input.attentionState ?? undefined
+          : existing?.attentionState;
+      if (hasAttentionInput) validateAttentionState(input.attentionState, status);
       const card: Card = {
         id: input.id,
         feedId,
         kind: input.kind ?? existing?.kind ?? "attention",
-        status: input.status ?? existing?.status ?? "to_review_new",
+        status,
+        attentionState,
         eyebrow: input.eyebrow ?? existing?.eyebrow ?? config.name,
         title: input.title,
         why: input.why,
@@ -2567,6 +3139,29 @@ export class AttentionDomain {
       await this.store.writeCard(card);
       await this.store.appendEvent({ feedId, cardId: card.id, type: existing ? "card.updated" : "card.created" });
       return card;
+    });
+  }
+
+  async evaluateAttentionTriggers(feedId: string, now = isoNow()): Promise<string[]> {
+    if (!validIsoDate(now)) throw new Error("Attention trigger evaluation needs an ISO timestamp.");
+    return this.store.serialize(async () => {
+      const config = await this.store.readConfig(feedId);
+      const nowEpoch = Date.parse(now);
+      const due = (await this.store.listCards(feedId))
+        .filter((card) => card.attentionState?.kind === "waiting" && card.attentionState.recheckAt && Date.parse(card.attentionState.recheckAt) <= nowEpoch)
+        .sort((left, right) => left.id.localeCompare(right.id));
+      for (const card of due) {
+        const trigger = card.attentionState?.kind === "waiting" ? card.attentionState.recheckAt : undefined;
+        card.attentionState = undefined;
+        card.status = "to_review_updated";
+        card.readyForPass = config.currentPass;
+        card.completedAt = undefined;
+        card.completionDisposition = undefined;
+        appendHistory(card, "attention.wait_elapsed", trigger);
+        await this.store.writeCard(card);
+        await this.store.appendEvent({ feedId, cardId: card.id, type: "attention.wait_elapsed", detail: { recheckAt: trigger } });
+      }
+      return due.map((card) => card.id);
     });
   }
 

@@ -6,7 +6,7 @@ import { AttentionDomain } from "../server/domain";
 import { projectMobileWorkspace } from "../server/mobile/projection";
 import { createLocalRuntime } from "../server/runtime";
 import { AttentionStore } from "../server/store";
-import type { MindContextPublicationInput } from "../shared/types";
+import type { Card, MindContextPublicationInput } from "../shared/types";
 
 const roots: string[] = [];
 
@@ -112,6 +112,18 @@ describe("mobile workspace projection", () => {
       ],
       actions: [
         {
+          id: "delegate",
+          label: "Delegate repo work",
+          behavior: "delegate_repo_task",
+          instruction: "Implement the exact bounded repository change.",
+          execution: {
+            repoKey: "private-repo",
+            resourceKey: "repo:private-repo",
+            sourceFingerprint: "private-source-fingerprint",
+          },
+          variant: "primary",
+        },
+        {
           id: "send",
           label: "Send reply",
           behavior: "approve_action",
@@ -158,6 +170,8 @@ describe("mobile workspace projection", () => {
     expect(routine).toMatchObject({ itemKind: "routine_action_group", reviewable: true, title: "Likely archive" });
     expect(serialized).not.toContain("capabilityToken");
     expect(serialized).not.toContain("thread-inbox");
+    expect(serialized).not.toContain("delegate_repo_task");
+    expect(serialized).not.toContain("private-source-fingerprint");
     expect(serialized).not.toContain("/Users/dan");
     expect(serialized).not.toContain("file:///Users");
     expect(card?.feedGeneration).not.toBe(`pass:${snapshot.feeds[0].currentPass}`);
@@ -166,6 +180,48 @@ describe("mobile workspace projection", () => {
     await domain.beginNextPass("inbox");
     const afterPass = (await projectMobileWorkspace(store)).cards.find((item) => item.cardId === "mobile-card");
     expect(afterPass?.feedGeneration).not.toBe(beforePass);
+  });
+
+  test("excludes waiting and blocked cards from the mobile review queue", async () => {
+    const { store, domain } = await setup();
+    const waiting = await domain.upsertCard("inbox", {
+      id: "waiting-card",
+      title: "Wait for Oliver.",
+      why: "The review request has already been sent.",
+      blocks: [],
+    });
+    const blocked = await domain.upsertCard("inbox", {
+      id: "blocked-card",
+      title: "Restore GitHub access.",
+      why: "The task cannot continue without access.",
+      blocks: [],
+    });
+    await store.writeCard({
+      ...waiting,
+      attentionState: {
+        kind: "waiting",
+        waitingOn: "Oliver",
+        resumeWhen: "Oliver replies.",
+        since: "2026-07-15T08:30:00.000Z",
+      },
+    } as Card);
+    await store.writeCard({
+      ...blocked,
+      attentionState: {
+        kind: "blocked",
+        blocker: "GitHub credentials are missing.",
+        unblockOwner: "Mo",
+        unblockAction: "Sign in to GitHub.",
+        since: "2026-07-15T08:30:00.000Z",
+      },
+    } as Card);
+
+    const snapshot = await projectMobileWorkspace(store);
+
+    // The built-in setup card remains reviewable; held cards do not add to that count.
+    expect(snapshot.feeds.find((feed) => feed.id === "inbox")?.reviewCount).toBe(1);
+    expect(snapshot.cards.find((card) => card.cardId === "waiting-card")?.reviewable).toBe(false);
+    expect(snapshot.cards.find((card) => card.cardId === "blocked-card")?.reviewable).toBe(false);
   });
 
   test("includes filtered On Your Mind sources without publisher ownership", async () => {

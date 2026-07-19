@@ -75,6 +75,10 @@ h2 { margin: 0; font: 500 26px/1.12 var(--serif); letter-spacing: -.02em; }
 .context-influence-research a { color: #566a50; }
 .context-influence a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .blocks { display: grid; gap: 13px; margin: 0 0 20px 22px; }
+.attention-state { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; margin: 0 0 20px 22px; padding: 15px 17px; border: 1px solid var(--line); border-radius: 8px; background: #f6f3e9; }
+.attention-state-blocked { border-color: #dfc7c2; background: #f8efed; }
+.attention-state > div { display: grid; gap: 3px; }
+.attention-state b { color: var(--ink-2); font-size: 13px; line-height: 1.4; }
 .block { color: var(--ink-2); }
 .block h3 { margin: 0 0 6px; color: var(--ink-3); font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .block p { margin: 0; }
@@ -361,7 +365,8 @@ pre { overflow: auto; padding: 12px; background: #f4f2eb; color: var(--ink-2); w
   .tabs .tab-quiet { display: none; }
   .tabs { gap: 19px; padding: 0 14px; }
   .attention-card { padding: 22px 17px 0; }
-  .why, .blocks, .context-influence, .parked-work { margin-left: 0; }
+  .why, .blocks, .context-influence, .attention-state, .parked-work { margin-left: 0; }
+  .attention-state { grid-template-columns: 1fr; }
   .chart-row { grid-template-columns: minmax(70px, .8fr) minmax(105px, 1fr) minmax(105px, 1fr); gap: 6px; }
   .chart-metric { grid-template-columns: 34px minmax(0, 1fr); gap: 4px; }
   .card-history { margin: 0 -17px; padding: 13px 17px; }

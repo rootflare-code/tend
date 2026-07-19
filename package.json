@@ -1,6 +1,6 @@
 {
   "name": "tend",
-  "version": "0.2.0",
+  "version": "0.3.0-rootflare.1",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -12,7 +12,7 @@
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint .",
-    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "check": "tsc --noEmit && oxlint . && bun test",
     "test": "bun test",
     "seed:demo": "bun tend.ts cli demo:seed",
     "tend": "bun tend.ts",

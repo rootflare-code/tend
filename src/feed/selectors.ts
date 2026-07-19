@@ -1,30 +1,34 @@
 import type { Tab } from "../app/types";
-import type { Card, CardAction, FeedView, RoutineActionGroup, WorkItemView } from "../types";
-import { safeConfiguredCardActions } from "../../shared/cardActions";
+import type { Card, FeedView, RoutineActionGroup, WorkItemView } from "../types";
+export { visibleCardActions } from "../../shared/cardActions";
 
 export function visibleCards(feed: FeedView, tab: Tab): Card[] {
   const pass = feed.config.currentPass;
   if (tab === "review") {
     return feed.cards
-      .filter((card) => (card.status === "to_review_new" || card.status === "to_review_updated") && card.readyForPass <= pass && !card.sweep?.hidden && !card.routineActionGroupId)
+      .filter((card) => (card.status === "to_review_new" || card.status === "to_review_updated") && !card.attentionState && card.readyForPass <= pass && !card.sweep?.hidden && !card.routineActionGroupId)
       .sort((left, right) => {
         if (left.sweep?.rank !== undefined || right.sweep?.rank !== undefined) return (left.sweep?.rank ?? Number.MAX_SAFE_INTEGER) - (right.sweep?.rank ?? Number.MAX_SAFE_INTEGER);
         if (left.status !== right.status) return left.status === "to_review_updated" ? -1 : 1;
         return (right.completedAt ?? right.updatedAt).localeCompare(left.completedAt ?? left.updatedAt);
       });
   }
-  if (tab === "queued") return feed.cards.filter((card) => (card.status === "queued" || card.status === "approved_blocked") && !card.routineActionGroupId);
-  if (tab === "working") return feed.cards.filter((card) => card.status === "working" && !card.routineActionGroupId);
-  return feed.cards.filter((card) => card.status === "done" && !card.routineActionGroupId);
+  if (tab === "queued") return feed.cards.filter((card) => activeWorkflowStatus(feed, card) === "queued" && !card.routineActionGroupId);
+  if (tab === "working") return feed.cards.filter((card) => activeWorkflowStatus(feed, card) === "working" && !card.routineActionGroupId);
+  if (tab === "waiting") return feed.cards.filter((card) => !activeWorkflowStatus(feed, card) && card.attentionState?.kind === "waiting" && !card.routineActionGroupId);
+  if (tab === "blocked") return feed.cards.filter((card) => !activeWorkflowStatus(feed, card) && (card.status === "approved_blocked" || card.attentionState?.kind === "blocked") && !card.routineActionGroupId);
+  return feed.cards.filter((card) => card.status === "done" && !card.attentionState && !card.routineActionGroupId);
 }
 
 export function visibleRoutineActions(feed: FeedView, tab: Tab): RoutineActionGroup[] {
+  if (tab === "waiting" || tab === "blocked") return [];
   const status = tab === "review" ? "proposed" : tab === "done" ? "completed" : tab;
   return feed.routineActions.filter((group) => group.status === status);
 }
 
 export function visibleFeedWork(feed: FeedView, tab: Tab): WorkItemView[] {
-  if (tab === "review") return [];
+  if (tab === "review" || tab === "waiting") return [];
+  if (tab === "blocked") return feed.work.filter((work) => work.cardId === "__feed__" && (work.status === "blocked" || work.status === "approved_blocked"));
   const status = tab === "done" ? "completed" : tab;
   return feed.work.filter((work) => work.cardId === "__feed__" && work.status === status);
 }
@@ -33,31 +37,9 @@ export function countFor(feed: FeedView, tab: Tab): number {
   return visibleCards(feed, tab).length + visibleRoutineActions(feed, tab).length + visibleFeedWork(feed, tab).length;
 }
 
-export function visibleCardActions(card: Card): CardAction[] {
-  const dismiss: CardAction = { id: "dismiss-card", label: "Dismiss card", behavior: "dismiss_card", variant: "secondary", shortcut: "d" };
-  const configuredActions = safeConfiguredCardActions(card.actions);
-  if (configuredActions.length) {
-    // Local dismissal is always available unless the card author supplied a custom local-dismiss
-    // control. Source cleanup remains a separate, explicitly configured action.
-    return configuredActions.some((action) => action.behavior === "dismiss_card") ? configuredActions : [dismiss, ...configuredActions];
-  }
-  if (!card.proposedAction || card.proposedAction.label === "Decide disposition") return [dismiss];
-  if (card.proposedAction.label === "Archive" || card.proposedAction.label === "Archive this thread") {
-    // The card explicitly proposes archiving the source, so surface the connector cleanup.
-    return [dismiss, { id: "default-cleanup", label: "Archive", behavior: "default_cleanup", variant: "primary", shortcut: "x" }];
-  }
-  return [
-    dismiss,
-    {
-      id: "proposed-action",
-      label: card.proposedAction.label,
-      behavior: "approve_action",
-      instruction: card.proposedAction.instruction,
-      artifactBlockId: card.proposedAction.artifactBlockId,
-      externalMutation: card.proposedAction.externalMutation,
-      mailboxPolicy: card.proposedAction.mailboxPolicy,
-      variant: "primary",
-      shortcut: "a",
-    },
-  ];
+function activeWorkflowStatus(feed: FeedView, card: Card): "queued" | "working" | undefined {
+  if (card.status === "queued" || card.status === "working") return card.status;
+  return feed.work
+    .filter((work) => work.cardId === card.id && (work.status === "queued" || work.status === "working"))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]?.status as "queued" | "working" | undefined;
 }

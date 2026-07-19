@@ -129,7 +129,7 @@ async function validateCliContract(): Promise<{
     "work:release --feed <id> --work <id> --token <token> [--session <id>]",
     "agent:presence --agent claude --session <id> [--label <text>]",
     "feed:drain-agent --feed <id> --agent <codex|claude>",
-    "work:complete --feed <id> --work <id> --token <token> --result <json>",
+    "work:complete --feed <id> --work <id> --token <token> (--result <json> | --result-file <path>)",
     "card:upsert --feed <id> (--card <json> | --card-file <path>)",
     "source:record-run --feed <id> --source <id> --snapshots <json> --judgments <json> --checkpoint <json> [--work <recollection-work-id>] [--context-use <json> | --context-use-file <path>]",
     "sweep:record-batch --feed <id> --runs <json-array> [--work <recollection-work-id>] [--context <mind-update-id>]",

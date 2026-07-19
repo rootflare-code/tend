@@ -64,6 +64,18 @@ top level, and agent operations live under `tend cli`. There is no separate runn
 
 Each feed has one home Codex thread. The home thread claims work through `tend cli` before using Gmail, GitHub, Slack, browser, files, or other local connectors. The local app stores recipes and workflow state; connector credentials stay in Codex Desktop.
 
+Material repository work uses a separate `repo_execution` lineage. The home thread is a thin
+Operator: reserve the exact repo and resource, create or reuse one deterministic repo-scoped Codex
+task, bind it, and monitor its receipt. Binding transfers claim and completion authority to that
+exact task. The domain permits at most two active repository executors globally and one per resource
+key. Operator policy uses the second slot only for an independent repository. Retry preserves the
+bound task.
+
+Cards carry an optional attention state independent of workflow status. Waiting and blocked states
+route unresolved cards out of the review lane while keeping them visible. Active queued or working
+work wins routing precedence; done cards cannot carry an attention state. Legacy
+`approved_blocked` remains the blocked form of an exact approved external action.
+
 ## Realtime
 
 Realtime is intentionally simple:
