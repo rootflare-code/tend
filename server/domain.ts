@@ -2500,7 +2500,11 @@ export class AttentionDomain {
   async completeWork(feedId: string, workId: string, token: string, result: { response: string; blocks?: CardBlock[]; proposedAction?: ProposedAction; actions?: CardAction[]; done?: boolean; postAction?: PostActionCompletion; receipt?: ExecutorReceipt }): Promise<WorkItem> {
     if (result.blocks) validateCardBlocks(result.blocks);
     validateCardActions(result.actions);
-    return this.store.serializeAtomic(async () => {
+    // Stale-approval quarantine writes must survive this method throwing. serializeAtomic wraps the
+    // callback in a SQLite transaction in the production runtime, so throwing inside the callback
+    // would roll the quarantine writes back and leave the item claimed as "working" forever. Stale
+    // branches therefore return a marker, and the error is thrown after the transaction commits.
+    const outcome = await this.store.serializeAtomic<{ work: WorkItem } | { staleError: string }>(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (
         work.kind === "repo_execution"
@@ -2509,7 +2513,7 @@ export class AttentionDomain {
         && work.capabilityToken === token
       ) {
         validateExecutorReceipt(work, result.receipt);
-        if (isDeepStrictEqual(work.executorReceipt, result.receipt)) return work;
+        if (isDeepStrictEqual(work.executorReceipt, result.receipt)) return { work };
         throw new Error("Repo execution already has a different terminal receipt.");
       }
       if (work.status !== "working") throw new Error("Work item is not currently claimed.");
@@ -2540,15 +2544,16 @@ export class AttentionDomain {
         if (!work.routineActionGroupId || !work.approvalDigest) throw new Error("Routine action work is missing its approved snapshot.");
         const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
         if (work.approvalDigest !== routineActionDigest(group)) {
+          const staleError = "Approval stale - the routine action group changed after approval.";
           work.status = "stale";
-          work.error = "Approval stale - the routine action group changed after approval.";
+          work.error = staleError;
           group.status = "stale";
-          group.error = work.error;
+          group.error = staleError;
           await this.releaseRoutineActionCards(group, true);
           await this.store.writeWork(work);
           await this.store.writeRoutineActionGroup(group);
           await this.store.appendEvent({ feedId, workId, type: "routine_action.stale", detail: { groupId: group.id } });
-          throw new Error(work.error);
+          return { staleError };
         }
         if (work.verifiedApprovalDigest !== work.approvalDigest) {
           throw new Error("Approved action must pass action:verify immediately before the external mutation.");
@@ -2574,15 +2579,16 @@ export class AttentionDomain {
             : actionDigest(card, work.cardActionId)
           : undefined;
         if (work.approvalDigest !== currentApprovalDigest) {
+          const staleError = "Approval stale - the proposed action or artifact changed after approval.";
           work.status = "stale";
-          work.error = "Approval stale - the proposed action or artifact changed after approval.";
+          work.error = staleError;
           card.status = "to_review_updated";
           card.readyForPass = (await this.store.readConfig(feedId)).currentPass + 1;
           appendHistory(card, "codex.stale_approval", work.id);
           await this.store.writeWork(work);
           await this.store.writeCard(card);
           await this.store.appendEvent({ feedId, cardId: card.id, workId, type: "action.stale" });
-          throw new Error(work.error);
+          return { staleError };
         }
         if (
           (work.kind === "execute_approved_action" || work.kind === "default_cleanup") &&
@@ -2628,7 +2634,7 @@ export class AttentionDomain {
             await this.store.writeWork(work);
             await this.store.writeCard(card);
             await this.store.appendEvent({ feedId, cardId: card.id, workId, type: "work.executor_blocked", detail: { receipt } });
-            return work;
+            return { work };
           }
           card.attentionState = receipt.outcome === "waiting" ? receipt.attentionState : undefined;
           const done = receipt.outcome === "completed";
@@ -2660,7 +2666,7 @@ export class AttentionDomain {
             detail: { response: work.response, postAction: result.postAction },
           });
           if (work.claimedBy?.agent !== "claude") await this.maybeEmitClaudeWake(feedId, work, undefined, { includeDropped: true });
-          return work;
+          return { work };
         }
         const config = await this.store.readConfig(feedId);
         const done = work.kind === "execute_approved_action" && work.completionCleanup
@@ -2683,8 +2689,10 @@ export class AttentionDomain {
       work.executorReceipt = result.receipt;
       await this.store.writeWork(work);
       await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "work.completed", detail: { response: work.response, postAction: result.postAction } });
-      return work;
+      return { work };
     });
+    if ("staleError" in outcome) throw new Error(outcome.staleError);
+    return outcome.work;
   }
 
   async verifyApprovedAction(feedId: string, workId: string, token: string, authenticatedMailbox?: string): Promise<{ approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string; completionCleanup?: string }> {
